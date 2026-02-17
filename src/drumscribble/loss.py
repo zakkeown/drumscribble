@@ -19,6 +19,10 @@ class DrumscribbleLoss(torch.nn.Module):
         onset_target: torch.Tensor,
         vel_target: torch.Tensor,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        # Clamp predictions for numerical stability (prevents log(0) in BCE)
+        onset_pred = onset_pred.clamp(1e-7, 1 - 1e-7)
+        offset_pred = offset_pred.clamp(1e-7, 1 - 1e-7)
+
         # Onset BCE
         onset_loss = F.binary_cross_entropy(onset_pred, onset_target, reduction="mean")
 

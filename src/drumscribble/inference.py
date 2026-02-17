@@ -20,6 +20,11 @@ def peak_pick(
 
     Returns:
         List of peak frame indices.
+
+    Note:
+        Peaks in the first ``pre_max`` or last ``post_max`` frames are
+        excluded. With defaults (pre_max=2, post_max=6) at 62.5 fps,
+        this means the first 32 ms and last 96 ms are not searched.
     """
     probs_np = probs.cpu().numpy()
     peaks = []

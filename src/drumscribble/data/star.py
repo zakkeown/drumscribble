@@ -2,6 +2,7 @@
 from pathlib import Path
 import torch
 from torch.utils.data import Dataset
+from torchcodec.decoders import AudioDecoder
 
 from drumscribble.audio import load_and_preprocess, compute_mel_spectrogram
 from drumscribble.targets import events_to_targets
@@ -58,7 +59,8 @@ class STARDataset(Dataset):
 
         self.chunks = []
         for i, entry in enumerate(self.entries):
-            duration_samples = int(60.0 * SAMPLE_RATE)
+            md = AudioDecoder(entry["audio"]).metadata
+            duration_samples = int(md.duration_seconds * SAMPLE_RATE)
             for start in range(0, duration_samples - self.chunk_samples + 1, self.chunk_samples):
                 self.chunks.append((i, start))
 

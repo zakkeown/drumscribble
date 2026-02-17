@@ -8,12 +8,18 @@ class FiLMConditioning(nn.Module):
 
     Projects conditioning features to per-channel gamma and beta.
     Pre-expands to match spatial dims (no broadcasting for ANE).
+    Initialized to identity transform (gamma=1, beta=0) so the model
+    starts from a working baseline before conditioning takes effect.
     """
 
     def __init__(self, feature_dim: int, target_dim: int):
         super().__init__()
         # Project conditioning to gamma and beta via Conv2d(1x1)
         self.proj = nn.Conv2d(feature_dim, target_dim * 2, kernel_size=1)
+        # Initialize to identity: gamma=1, beta=0
+        nn.init.zeros_(self.proj.weight)
+        nn.init.zeros_(self.proj.bias)
+        self.proj.bias.data[:target_dim] = 1.0  # gamma channels start at 1
 
     def forward(
         self, x: torch.Tensor, conditioning: torch.Tensor | None

@@ -1,23 +1,27 @@
 """Audio preprocessing: loading, resampling, mel spectrogram."""
+import threading
+
 import torch
 import torchaudio
 from drumscribble.config import SAMPLE_RATE, N_MELS, HOP_LENGTH
 
 _mel_transform = None
+_mel_lock = threading.Lock()
 
 
 def _get_mel_transform(device: torch.device = torch.device("cpu")):
     global _mel_transform
-    if _mel_transform is None or _mel_transform.mel_scale.fb.device != device:
-        _mel_transform = torchaudio.transforms.MelSpectrogram(
-            sample_rate=SAMPLE_RATE,
-            n_fft=2048,
-            hop_length=HOP_LENGTH,
-            n_mels=N_MELS,
-            f_min=20.0,
-            f_max=8000.0,
-            power=2.0,
-        ).to(device)
+    with _mel_lock:
+        if _mel_transform is None or _mel_transform.mel_scale.fb.device != device:
+            _mel_transform = torchaudio.transforms.MelSpectrogram(
+                sample_rate=SAMPLE_RATE,
+                n_fft=2048,
+                hop_length=HOP_LENGTH,
+                n_mels=N_MELS,
+                f_min=20.0,
+                f_max=8000.0,
+                power=2.0,
+            ).to(device)
     return _mel_transform
 
 
