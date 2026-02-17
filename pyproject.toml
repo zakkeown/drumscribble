@@ -1,0 +1,28 @@
+[project]
+name = "drumscribble"
+version = "0.1.0"
+description = "SOTA on-device drum transcription"
+requires-python = ">=3.11"
+dependencies = [
+    "torch>=2.2",
+    "torchaudio>=2.2",
+    "pretty_midi>=0.2.10",
+    "pyyaml>=6.0",
+    "tqdm>=4.66",
+    "mir_eval>=0.7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-cov>=4.0"]
+export = ["coremltools>=8.2"]
+mert = ["transformers>=4.36"]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
