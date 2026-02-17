@@ -20,25 +20,19 @@ from drumscribble.train import (
 )
 
 
-def make_augment_collate(augment: SpecAugment):
-    """Create a collate function that applies SpecAugment to mel batches.
+class AugmentCollate:
+    """Picklable collate function that applies SpecAugment to mel batches."""
 
-    Args:
-        augment: SpecAugment transform to apply.
+    def __init__(self, augment: SpecAugment):
+        self.augment = augment
 
-    Returns:
-        Collate function for use with DataLoader.
-    """
-
-    def collate_fn(batch):
+    def __call__(self, batch):
         mels, onsets, vels = zip(*batch)
         mel_batch = torch.stack(mels)
         onset_batch = torch.stack(onsets)
         vel_batch = torch.stack(vels)
-        mel_batch = augment(mel_batch)
+        mel_batch = self.augment(mel_batch)
         return mel_batch, onset_batch, vel_batch
-
-    return collate_fn
 
 
 def build_dataset(dataset_name: str, data_cfg: dict, train_cfg: dict):
@@ -137,7 +131,7 @@ def main():
     # --- Dataset & DataLoader ---
     dataset_name = args.dataset or train_cfg.get("dataset", "egmd")
     augment = SpecAugment()
-    collate_fn = make_augment_collate(augment)
+    collate_fn = AugmentCollate(augment)
     num_workers = 0 if device == "mps" else train_cfg["num_workers"]
 
     if dataset_name == "multi":
@@ -181,7 +175,7 @@ def main():
     )
     loss_fn = DrumscribbleLoss()
 
-    epochs = args.epochs or train_cfg["epochs"]
+    epochs = args.epochs if args.epochs is not None else train_cfg["epochs"]
 
     # --- Scheduler ---
     warmup_epochs = train_cfg.get("warmup_epochs", 5)

@@ -38,15 +38,23 @@ class EGMDDataset(Dataset):
 
         csv_path = self.root / "e-gmd-v1.0.0.csv"
         self.entries = []
+        skipped = 0
         with open(csv_path) as f:
             reader = csv.DictReader(f)
             for row in reader:
                 if row["split"] == split:
+                    audio_path = self.root / row["audio_filename"]
+                    midi_path = self.root / row["midi_filename"]
+                    if not audio_path.exists() or not midi_path.exists():
+                        skipped += 1
+                        continue
                     self.entries.append({
-                        "audio": str(self.root / row["audio_filename"]),
-                        "midi": str(self.root / row["midi_filename"]),
+                        "audio": str(audio_path),
+                        "midi": str(midi_path),
                         "duration": float(row["duration"]),
                     })
+        if skipped:
+            print(f"E-GMD: skipped {skipped} entries with missing files")
 
         self.chunks = []
         for i, entry in enumerate(self.entries):
