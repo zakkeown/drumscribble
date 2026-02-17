@@ -1,0 +1,20 @@
+# DrumscribbleCNN training config
+model:
+  n_mels: 128
+  backbone_dims: [64, 128, 256, 384]
+  backbone_depths: [5, 5, 5, 5]
+  num_attn_layers: 3
+  num_attn_heads: 4
+
+training:
+  batch_size: 32
+  lr: 0.001
+  weight_decay: 0.05
+  epochs: 100
+  grad_clip: 1.0
+  chunk_seconds: 10.0
+  num_workers: 4
+
+data:
+  egmd_root: ~/Documents/Datasets/e-gmd
+  star_root: ~/Documents/Datasets/star-drums
