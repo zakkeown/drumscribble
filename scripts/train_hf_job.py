@@ -32,8 +32,10 @@ Usage (via hf jobs):
         -- --dataset multi --epochs 100
 """
 import argparse
+import glob
 import os
 import sys
+import tarfile
 from pathlib import Path
 
 import torch
@@ -52,6 +54,21 @@ def download_dataset(repo_id: str, local_dir: str, token: str) -> str:
     )
     print(f"  -> {path}")
     return path
+
+
+def extract_tars(data_dir: str) -> None:
+    """Extract any .tar archives in the dataset directory."""
+    tar_files = sorted(glob.glob(os.path.join(data_dir, "*.tar")))
+    if not tar_files:
+        return
+    print(f"Extracting {len(tar_files)} tar archives...")
+    for tar_path in tar_files:
+        name = os.path.basename(tar_path)
+        print(f"  Extracting {name}...")
+        with tarfile.open(tar_path) as tf:
+            tf.extractall(data_dir)
+        os.remove(tar_path)
+    print("  Extraction complete.")
 
 
 def main():
@@ -96,9 +113,11 @@ def main():
 
     if args.dataset in ("egmd", "multi"):
         egmd_dir = download_dataset(args.egmd_repo, "/tmp/e-gmd", token)
+        extract_tars(egmd_dir)
 
     if args.dataset in ("star", "multi"):
         star_dir = download_dataset(args.star_repo, "/tmp/star-drums", token)
+        extract_tars(star_dir)
 
     # --- Create output repo if needed ---
     try:
