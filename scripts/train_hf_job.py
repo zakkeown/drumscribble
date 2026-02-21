@@ -61,7 +61,12 @@ def load_features(repo_id: str, split: str, token: str | None) -> list[dict]:
     import datasets
 
     print(f"Loading {repo_id} split={split}...")
-    ds = datasets.load_dataset(repo_id, "features", split=split, token=token)
+    ds = datasets.load_dataset(
+        repo_id,
+        data_files=f"features/{split}-*.parquet",
+        split="train",  # data_files loads everything as "train" split
+        token=token,
+    )
     rows = list(ds)
     print(f"  Loaded {len(rows)} rows from {repo_id}/{split}")
     return rows
