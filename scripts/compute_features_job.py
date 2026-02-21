@@ -232,13 +232,15 @@ def process_egmd_streaming(
 
     Returns total number of feature rows written.
     """
-    from datasets import load_dataset
+    from datasets import Audio, load_dataset
 
     total = 0
     for split in ["train", "validation", "test"]:
         print(f"\n=== {split} ===")
         try:
             ds = load_dataset(repo, split=split, token=token, streaming=True)
+            # Disable automatic audio decoding — we decode with soundfile ourselves
+            ds = ds.cast_column("audio", Audio(decode=False))
         except Exception as e:
             print(f"  Split '{split}' not found, skipping: {e}")
             continue
