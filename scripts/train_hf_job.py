@@ -10,9 +10,10 @@
 # ///
 """HF Jobs training script for DrumscribbleCNN (pre-computed features).
 
-Loads pre-computed mel/onset/velocity features from HF datasets repos
-via `datasets.load_dataset()` + `FeaturesDataset`. Much faster than the
-old raw-audio pipeline (5-10 GB download instead of 90 GB+, no mel
+Downloads pre-computed mel/onset/velocity feature Parquet shards from
+HF dataset repos, then reads them lazily via ParquetFeaturesDataset
+(one shard cached in memory at a time). Much faster than the old
+raw-audio pipeline (5-10 GB download instead of 90 GB+, no mel
 computation at train time).
 
 Supports E-GMD, STAR, or multi-dataset (both) training.
@@ -46,11 +47,12 @@ import torch
 from huggingface_hub import HfApi
 
 
-def load_features(repo_id: str, split: str, token: str | None) -> list[dict]:
-    """Load pre-computed features from an HF dataset repo.
+def download_shards(repo_id: str, split: str, token: str | None) -> list[str]:
+    """Download feature Parquet shards and return local file paths.
 
-    Downloads Parquet shards from features/{split}-*.parquet and reads
-    them directly with pyarrow (bypassing datasets schema casting).
+    Downloads shards from features/{split}-*.parquet via hf_hub_download
+    (cached locally). Does NOT load data into memory — that happens lazily
+    in ParquetFeaturesDataset.
 
     Args:
         repo_id: HF dataset repo (e.g. 'schismaudio/e-gmd').
@@ -58,16 +60,13 @@ def load_features(repo_id: str, split: str, token: str | None) -> list[dict]:
         token: HF API token (needed for private repos).
 
     Returns:
-        List of dicts with keys: mel_spectrogram, onset_targets,
-        velocity_targets, n_frames.
+        List of local file paths to downloaded Parquet shards.
     """
-    import pyarrow.parquet as pq
     from huggingface_hub import HfApi, hf_hub_download
 
-    print(f"Loading {repo_id} split={split}...")
+    print(f"Downloading shards for {repo_id} split={split}...")
     api = HfApi(token=token)
 
-    # List all feature shards for this split
     all_files = [
         f for f in api.list_repo_files(repo_id, repo_type="dataset")
         if f.startswith(f"features/{split}-") and f.endswith(".parquet")
@@ -75,24 +74,23 @@ def load_features(repo_id: str, split: str, token: str | None) -> list[dict]:
     all_files.sort()
     print(f"  Found {len(all_files)} shards")
 
-    rows = []
+    paths = []
     for i, filename in enumerate(all_files):
         local_path = hf_hub_download(
             repo_id=repo_id, repo_type="dataset",
             filename=filename, token=token,
         )
-        table = pq.read_table(local_path)
-        rows.extend(table.to_pylist())
+        paths.append(local_path)
         if (i + 1) % 10 == 0:
-            print(f"  Read {i + 1}/{len(all_files)} shards ({len(rows)} rows)")
+            print(f"  Downloaded {i + 1}/{len(all_files)} shards")
 
-    print(f"  Loaded {len(rows)} rows from {repo_id}/{split}")
-    return rows
+    print(f"  Downloaded {len(paths)} shards from {repo_id}/{split}")
+    return paths
 
 
 def validate(
     model: torch.nn.Module,
-    val_rows: list[dict],
+    val_shards: list[str],
     device: str,
     chunk_frames: int,
 ) -> dict[str, float]:
@@ -100,7 +98,7 @@ def validate(
 
     Args:
         model: DrumscribbleCNN (should already have EMA weights applied).
-        val_rows: List of feature dicts for validation split.
+        val_shards: List of local Parquet shard paths for validation.
         device: Device string ('cuda' or 'cpu').
         chunk_frames: Number of frames per chunk.
 
@@ -110,11 +108,11 @@ def validate(
     from torch.utils.data import DataLoader
 
     from drumscribble.config import FPS, GM_CLASSES
-    from drumscribble.data.features import FeaturesDataset
+    from drumscribble.data.features import ParquetFeaturesDataset
     from drumscribble.evaluate import evaluate_events
     from drumscribble.inference import detections_to_events
 
-    val_ds = FeaturesDataset(val_rows, chunk_frames=chunk_frames)
+    val_ds = ParquetFeaturesDataset(val_shards, chunk_frames=chunk_frames)
     if len(val_ds) == 0:
         print("  WARNING: No validation chunks available")
         return {"val_f1": 0.0, "val_precision": 0.0, "val_recall": 0.0}
@@ -209,20 +207,20 @@ def main():
         print("WARNING: No GPU detected, training on CPU")
     print(f"Device: {device}")
 
-    # --- Load pre-computed features ---
-    train_rows: list[dict] = []
-    val_rows: list[dict] = []
+    # --- Download feature shards (lazy — no data loaded into memory) ---
+    train_shards: list[str] = []
+    val_shards: list[str] = []
 
     if args.dataset in ("egmd", "multi"):
-        train_rows.extend(load_features(args.egmd_repo, "train", token))
-        val_rows.extend(load_features(args.egmd_repo, "validation", token))
+        train_shards.extend(download_shards(args.egmd_repo, "train", token))
+        val_shards.extend(download_shards(args.egmd_repo, "validation", token))
 
     if args.dataset in ("star", "multi"):
-        train_rows.extend(load_features(args.star_repo, "train", token))
-        val_rows.extend(load_features(args.star_repo, "validation", token))
+        train_shards.extend(download_shards(args.star_repo, "train", token))
+        val_shards.extend(download_shards(args.star_repo, "validation", token))
 
-    print(f"Total training rows: {len(train_rows)}")
-    print(f"Total validation rows: {len(val_rows)}")
+    print(f"Train shards: {len(train_shards)}")
+    print(f"Val shards: {len(val_shards)}")
 
     # --- Create output repo if needed ---
     try:
@@ -235,7 +233,7 @@ def main():
     from torch.utils.data import DataLoader
 
     from drumscribble.data.augment import SpecAugment
-    from drumscribble.data.features import FeaturesDataset
+    from drumscribble.data.features import ParquetFeaturesDataset
     from drumscribble.loss import DrumscribbleLoss
     from drumscribble.model.drumscribble import DrumscribbleCNN
     from drumscribble.train import (
@@ -275,7 +273,7 @@ def main():
     augment = SpecAugment()
     collate_fn = AugmentCollate(augment)
 
-    dataset = FeaturesDataset(train_rows, chunk_frames=chunk_frames)
+    dataset = ParquetFeaturesDataset(train_shards, chunk_frames=chunk_frames)
     print(f"Training chunks: {len(dataset):,}")
 
     loader = DataLoader(
@@ -335,8 +333,8 @@ def main():
             "egmd_repo": args.egmd_repo,
             "star_repo": args.star_repo,
             "output_repo": args.output_repo,
-            "train_rows": len(train_rows),
-            "val_rows": len(val_rows),
+            "train_shards": len(train_shards),
+            "val_shards": len(val_shards),
             "train_chunks": len(dataset),
             "parameters": params,
         },
@@ -365,7 +363,7 @@ def main():
         if (epoch + 1) % 10 == 0:
             # --- Validation with EMA weights ---
             ema.apply(model)
-            val_metrics = validate(model, val_rows, device, chunk_frames)
+            val_metrics = validate(model, val_shards, device, chunk_frames)
             ema.restore(model)
 
             print(f"  Val F1={val_metrics['val_f1']:.4f} | "
@@ -400,7 +398,7 @@ def main():
     ema.apply(model)
 
     # Final validation
-    final_metrics = validate(model, val_rows, device, chunk_frames)
+    final_metrics = validate(model, val_shards, device, chunk_frames)
     print(f"\nFinal Val F1={final_metrics['val_f1']:.4f} | "
           f"P={final_metrics['val_precision']:.4f} | "
           f"R={final_metrics['val_recall']:.4f}")
