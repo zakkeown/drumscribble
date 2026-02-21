@@ -192,18 +192,31 @@ def parse_star_annotation(ann_path: str) -> list[tuple[float, int, int]]:
 # Parquet shard writing
 # ---------------------------------------------------------------------------
 
-def _write_shard(
+def _write_and_upload_shard(
     rows: list[dict],
-    output_dir: Path,
     split: str,
     shard_idx: int,
+    repo: str,
+    token: str,
 ) -> None:
-    """Write a list of feature rows to a single Parquet shard."""
-    output_dir.mkdir(parents=True, exist_ok=True)
+    """Write a Parquet shard, upload it to HF Hub, then delete local file."""
+    tmp_path = Path(f"/tmp/_shard_{split}_{shard_idx:05d}.parquet")
     filename = f"{split}-{shard_idx:05d}.parquet"
     table = pa.Table.from_pylist(rows)
-    pq.write_table(table, output_dir / filename, compression="zstd")
-    print(f"  Wrote {filename} ({len(rows)} rows)")
+    pq.write_table(table, tmp_path, compression="zstd")
+    size_mb = tmp_path.stat().st_size / (1024 * 1024)
+    print(f"  Wrote {filename} ({len(rows)} rows, {size_mb:.1f}MB)")
+
+    api = HfApi(token=token)
+    api.upload_file(
+        path_or_fileobj=str(tmp_path),
+        path_in_repo=f"features/{filename}",
+        repo_id=repo,
+        repo_type="dataset",
+        commit_message=f"Add features shard {filename}",
+    )
+    print(f"  Uploaded {filename}")
+    tmp_path.unlink()  # free disk immediately
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +226,6 @@ def _write_shard(
 def process_egmd_streaming(
     repo: str,
     token: str,
-    output_dir: Path,
     max_shard_bytes: int,
 ) -> int:
     """Stream E-GMD Parquet rows, compute features, write sharded Parquet.
@@ -286,7 +298,7 @@ def process_egmd_streaming(
 
                 # Flush shard when big enough
                 if current_bytes >= max_shard_bytes:
-                    _write_shard(rows, output_dir, split, shard_idx)
+                    _write_and_upload_shard(rows, split, shard_idx, repo, token)
                     shard_idx += 1
                     rows = []
                     current_bytes = 0
@@ -299,7 +311,7 @@ def process_egmd_streaming(
 
         # Flush remaining rows
         if rows:
-            _write_shard(rows, output_dir, split, shard_idx)
+            _write_and_upload_shard(rows, split, shard_idx, repo, token)
             shard_idx += 1
 
         print(f"  {split}: {split_rows} features in {shard_idx} shards")
@@ -311,7 +323,6 @@ def process_egmd_streaming(
 def process_star_streaming(
     repo: str,
     token: str,
-    output_dir: Path,
     max_shard_bytes: int,
 ) -> int:
     """Download STAR files one at a time, compute features, write Parquet.
@@ -434,7 +445,7 @@ def process_star_streaming(
 
                 # Flush shard when big enough
                 if current_bytes >= max_shard_bytes:
-                    _write_shard(rows, output_dir, split_key, shard_idx)
+                    _write_and_upload_shard(rows, split_key, shard_idx, repo, token)
                     shard_idx += 1
                     rows = []
                     current_bytes = 0
@@ -458,37 +469,13 @@ def process_star_streaming(
 
         # Flush remaining rows
         if rows:
-            _write_shard(rows, output_dir, split_key, shard_idx)
+            _write_and_upload_shard(rows, split_key, shard_idx, repo, token)
             shard_idx += 1
 
         print(f"  {split_key}: {split_rows} features in {shard_idx} shards")
         total += split_rows
 
     return total
-
-
-# ---------------------------------------------------------------------------
-# HF Hub integration
-# ---------------------------------------------------------------------------
-
-def upload_features(
-    repo: str,
-    features_dir: Path,
-    token: str,
-) -> None:
-    """Upload the features/ directory to HF Hub as a config."""
-    api = HfApi(token=token)
-    print(f"Uploading features to {repo} (features/ config)...")
-    t0 = time.monotonic()
-    api.upload_folder(
-        repo_id=repo,
-        repo_type="dataset",
-        folder_path=str(features_dir),
-        path_in_repo="features/",
-        commit_message="Add pre-computed mel spectrogram + onset/velocity features",
-    )
-    elapsed = time.monotonic() - t0
-    print(f"Upload complete ({elapsed:.1f}s)")
 
 
 # ---------------------------------------------------------------------------
@@ -527,7 +514,6 @@ def main() -> None:
         sys.exit(1)
 
     max_shard_bytes = args.max_shard_mb * 1024 * 1024
-    features_dir = Path(f"/tmp/{args.repo.replace('/', '_')}_features")
 
     print(f"Dataset:  {args.dataset}")
     print(f"Repo:     {args.repo}")
@@ -540,11 +526,11 @@ def main() -> None:
 
     if args.dataset == "egmd":
         total = process_egmd_streaming(
-            args.repo, token, features_dir, max_shard_bytes,
+            args.repo, token, max_shard_bytes,
         )
     elif args.dataset == "star":
         total = process_star_streaming(
-            args.repo, token, features_dir, max_shard_bytes,
+            args.repo, token, max_shard_bytes,
         )
     else:
         raise ValueError(f"Unknown dataset: {args.dataset}")
@@ -556,11 +542,7 @@ def main() -> None:
         print("No features computed. Check dataset contents.", file=sys.stderr)
         sys.exit(1)
 
-    print()
-    upload_features(args.repo, features_dir, token)
-
-    print()
-    print(f"All done. {total} feature rows uploaded to "
+    print(f"\nAll done. {total} feature rows uploaded to "
           f"{args.repo} (features/ config).")
 
 
