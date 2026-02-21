@@ -13,21 +13,21 @@
 # ///
 """HF Jobs script: compute mel spectrograms + onset/velocity targets.
 
-Downloads a raw drum dataset from HF Hub, computes pre-processed features
-(mel spectrograms, onset targets, velocity targets), and uploads them back
-as a ``features/`` config in the same dataset repo.
+Streams a raw drum dataset from HF Hub (no full download), computes
+pre-processed features (mel spectrograms, onset targets, velocity targets),
+and uploads them back as a ``features/`` config in the same dataset repo.
 
 Designed to run on HF Jobs infrastructure (CPU instance, ~2-3h).
 
 Usage (via ``uv run`` or HF Jobs):
     HF_TOKEN=hf_... python compute_features_job.py --dataset egmd --repo schismaudio/e-gmd
-    HF_TOKEN=hf_... python compute_features_job.py --dataset star --repo schismaudio/star-drums
+    HF_TOKEN=hf_... python compute_features_job.py --dataset star --repo zkeown/star-drums
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
+import io
 import os
 import sys
 import time
@@ -39,7 +39,7 @@ import pretty_midi
 import pyarrow as pa
 import pyarrow.parquet as pq
 import soundfile as sf
-from huggingface_hub import HfApi, snapshot_download
+from huggingface_hub import HfApi, hf_hub_download
 
 # ---------------------------------------------------------------------------
 # Audio & target parameters (must match drumscribble.config)
@@ -82,14 +82,36 @@ STAR_ABBREV_TO_GM = {
 # Feature computation
 # ---------------------------------------------------------------------------
 
+def load_audio_from_bytes(audio_bytes: bytes) -> np.ndarray:
+    """Decode audio from in-memory bytes, convert to mono, resample."""
+    audio, sr = sf.read(io.BytesIO(audio_bytes), dtype="float32")
+    if audio.ndim > 1:
+        audio = audio.mean(axis=1)
+    if sr != SAMPLE_RATE:
+        audio = librosa.resample(audio, orig_sr=sr, target_sr=SAMPLE_RATE)
+    return audio
+
+
 def load_audio_mono(path: str) -> np.ndarray:
-    """Load audio file, convert to mono, resample to SAMPLE_RATE."""
+    """Load audio file from disk, convert to mono, resample to SAMPLE_RATE."""
     audio, sr = sf.read(path, dtype="float32")
     if audio.ndim > 1:
         audio = audio.mean(axis=1)
     if sr != SAMPLE_RATE:
         audio = librosa.resample(audio, orig_sr=sr, target_sr=SAMPLE_RATE)
     return audio
+
+
+def parse_midi_from_bytes(midi_bytes: bytes) -> list[tuple[float, int, int]]:
+    """Parse MIDI from in-memory bytes to (time, note, velocity) events."""
+    pm = pretty_midi.PrettyMIDI(io.BytesIO(midi_bytes))
+    events = []
+    for inst in pm.instruments:
+        if inst.is_drum:
+            for note in inst.notes:
+                events.append((note.start, note.pitch, note.velocity))
+    events.sort(key=lambda x: x[0])
+    return events
 
 
 def compute_mel(audio: np.ndarray) -> np.ndarray:
@@ -147,18 +169,6 @@ def compute_onset_targets(
 # Annotation parsers
 # ---------------------------------------------------------------------------
 
-def parse_midi_events(midi_path: str) -> list[tuple[float, int, int]]:
-    """Parse MIDI file to (time_seconds, gm_note, velocity) events."""
-    pm = pretty_midi.PrettyMIDI(midi_path)
-    events = []
-    for instrument in pm.instruments:
-        if instrument.is_drum:
-            for note in instrument.notes:
-                events.append((note.start, note.pitch, note.velocity))
-    events.sort(key=lambda x: x[0])
-    return events
-
-
 def parse_star_annotation(ann_path: str) -> list[tuple[float, int, int]]:
     """Parse STAR TSV annotation to (time_seconds, gm_note, velocity) events."""
     events = []
@@ -179,223 +189,287 @@ def parse_star_annotation(ann_path: str) -> list[tuple[float, int, int]]:
 
 
 # ---------------------------------------------------------------------------
-# Dataset-specific entry discovery
+# Parquet shard writing
 # ---------------------------------------------------------------------------
 
-def discover_egmd_entries(root: Path) -> list[dict]:
-    """Discover E-GMD entries from CSV manifest."""
-    csv_candidates = [
-        root / "e-gmd-v1.0.0.csv",
-        root / "info.csv",
-    ]
-    csv_path = None
-    for c in csv_candidates:
-        if c.exists():
-            csv_path = c
-            break
-    if csv_path is None:
-        raise FileNotFoundError(f"No CSV manifest found in {root}")
-
-    entries = []
-    with open(csv_path) as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            audio_path = root / row["audio_filename"]
-            midi_path = root / row["midi_filename"]
-            if not audio_path.exists() or not midi_path.exists():
-                continue
-            entries.append({
-                "audio_path": str(audio_path),
-                "midi_path": str(midi_path),
-                "split": row.get("split", "train"),
-                "duration": float(row.get("duration", 0)),
-                "style": row.get("style", ""),
-                "bpm": int(row["bpm"]) if row.get("bpm") else 0,
-                "drummer": row.get("drummer", ""),
-                "session": row.get("session", ""),
-                "beat_type": row.get("beat_type", ""),
-                "time_signature": row.get("time_signature", ""),
-                "kit_name": row.get("kit_name", ""),
-                "source_id": row.get("id", ""),
-            })
-    return entries
-
-
-def discover_star_entries(root: Path) -> list[dict]:
-    """Discover STAR Drums entries from directory structure."""
-    entries = []
-    for split_name in ["training", "validation", "test"]:
-        split_dir = root / "data" / split_name
-        if not split_dir.exists():
-            continue
-        for source_dir in sorted(split_dir.iterdir()):
-            if not source_dir.is_dir():
-                continue
-            ann_dir = source_dir / "annotation"
-            audio_dir = source_dir / "audio" / "mix"
-            if not ann_dir.exists() or not audio_dir.exists():
-                continue
-            for ann_file in sorted(ann_dir.glob("*.txt")):
-                audio_file = audio_dir / ann_file.stem
-                for ext in [".flac", ".wav", ".mp3"]:
-                    candidate = audio_dir / (ann_file.stem + ext)
-                    if candidate.exists():
-                        audio_file = candidate
-                        break
-                else:
-                    continue
-
-                entries.append({
-                    "audio_path": str(audio_file),
-                    "annotation_path": str(ann_file),
-                    "split": "train" if split_name == "training" else split_name,
-                    "source": source_dir.name,
-                    "track_id": ann_file.stem,
-                })
-    return entries
-
-
-# ---------------------------------------------------------------------------
-# Feature generation
-# ---------------------------------------------------------------------------
-
-def process_egmd_entry(entry: dict) -> dict | None:
-    """Process one E-GMD entry into a feature row."""
-    try:
-        audio = load_audio_mono(entry["audio_path"])
-        mel = compute_mel(audio)
-        n_frames = mel.shape[1]
-        events = parse_midi_events(entry["midi_path"])
-        onset, vel = compute_onset_targets(events, n_frames)
-
-        return {
-            "mel_spectrogram": mel.tobytes(),
-            "onset_targets": onset.tobytes(),
-            "velocity_targets": vel.tobytes(),
-            "n_frames": n_frames,
-            "n_mels": N_MELS,
-            "n_classes": NUM_CLASSES,
-            "sample_rate": SAMPLE_RATE,
-            "hop_length": HOP_LENGTH,
-            "fps": FPS,
-            "duration": len(audio) / SAMPLE_RATE,
-            "split": entry["split"],
-            "style": entry.get("style", ""),
-            "bpm": entry.get("bpm", 0),
-            "drummer": entry.get("drummer", ""),
-            "session": entry.get("session", ""),
-            "beat_type": entry.get("beat_type", ""),
-            "time_signature": entry.get("time_signature", ""),
-            "kit_name": entry.get("kit_name", ""),
-            "source_id": entry.get("source_id", ""),
-            "source_audio": Path(entry["audio_path"]).name,
-        }
-    except Exception as e:
-        print(f"  SKIP {entry['audio_path']}: {e}", file=sys.stderr)
-        return None
-
-
-def process_star_entry(entry: dict) -> dict | None:
-    """Process one STAR Drums entry into a feature row."""
-    try:
-        audio = load_audio_mono(entry["audio_path"])
-        mel = compute_mel(audio)
-        n_frames = mel.shape[1]
-        events = parse_star_annotation(entry["annotation_path"])
-        onset, vel = compute_onset_targets(events, n_frames)
-
-        return {
-            "mel_spectrogram": mel.tobytes(),
-            "onset_targets": onset.tobytes(),
-            "velocity_targets": vel.tobytes(),
-            "n_frames": n_frames,
-            "n_mels": N_MELS,
-            "n_classes": NUM_CLASSES,
-            "sample_rate": SAMPLE_RATE,
-            "hop_length": HOP_LENGTH,
-            "fps": FPS,
-            "duration": len(audio) / SAMPLE_RATE,
-            "split": entry["split"],
-            "source": entry.get("source", ""),
-            "track_id": entry.get("track_id", ""),
-            "source_audio": Path(entry["audio_path"]).name,
-        }
-    except Exception as e:
-        print(f"  SKIP {entry['audio_path']}: {e}", file=sys.stderr)
-        return None
-
-
-# ---------------------------------------------------------------------------
-# Parquet writing
-# ---------------------------------------------------------------------------
-
-def write_parquet_shards(
+def _write_shard(
     rows: list[dict],
     output_dir: Path,
     split: str,
-    max_shard_bytes: int = 500 * 1024 * 1024,
-) -> int:
-    """Write feature rows to sharded zstd-compressed parquet files.
-
-    Output: output_dir/{split}-00000-of-NNNNN.parquet
-
-    Returns the number of shards written.
-    """
+    shard_idx: int,
+) -> None:
+    """Write a list of feature rows to a single Parquet shard."""
     output_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{split}-{shard_idx:05d}.parquet"
+    table = pa.Table.from_pylist(rows)
+    pq.write_table(table, output_dir / filename, compression="zstd")
+    print(f"  Wrote {filename} ({len(rows)} rows)")
 
-    if not rows:
-        print(f"  No rows for split '{split}', skipping.")
-        return 0
 
-    # Estimate shard boundaries by feature tensor sizes
-    shards: list[list[dict]] = []
-    current_shard: list[dict] = []
-    current_bytes = 0
-    for row in rows:
-        row_bytes = (
-            len(row["mel_spectrogram"])
-            + len(row["onset_targets"])
-            + len(row["velocity_targets"])
-        )
-        if current_bytes + row_bytes > max_shard_bytes and current_shard:
-            shards.append(current_shard)
-            current_shard = []
-            current_bytes = 0
-        current_shard.append(row)
-        current_bytes += row_bytes
-    if current_shard:
-        shards.append(current_shard)
+# ---------------------------------------------------------------------------
+# Streaming processors
+# ---------------------------------------------------------------------------
 
-    n_shards = len(shards)
-    for shard_idx, shard_rows in enumerate(shards):
-        filename = f"{split}-{shard_idx:05d}-of-{n_shards:05d}.parquet"
-        filepath = output_dir / filename
+def process_egmd_streaming(
+    repo: str,
+    token: str,
+    output_dir: Path,
+    max_shard_bytes: int,
+) -> int:
+    """Stream E-GMD Parquet rows, compute features, write sharded Parquet.
 
-        table = pa.Table.from_pylist(shard_rows)
-        pq.write_table(table, filepath, compression="zstd")
-        print(f"  Wrote {filepath.name} ({len(shard_rows)} rows)")
+    Returns total number of feature rows written.
+    """
+    from datasets import load_dataset
 
-    return n_shards
+    total = 0
+    for split in ["train", "validation", "test"]:
+        print(f"\n=== {split} ===")
+        try:
+            ds = load_dataset(repo, split=split, token=token, streaming=True)
+        except Exception as e:
+            print(f"  Split '{split}' not found, skipping: {e}")
+            continue
+
+        rows: list[dict] = []
+        current_bytes = 0
+        shard_idx = 0
+        split_rows = 0
+
+        for i, item in enumerate(ds):
+            try:
+                # Decode audio from bytes
+                audio_bytes = item["audio"]["bytes"]
+                audio = load_audio_from_bytes(audio_bytes)
+
+                mel = compute_mel(audio)
+                n_frames = mel.shape[1]
+
+                # Parse MIDI from bytes
+                midi_bytes = item["midi"]
+                if isinstance(midi_bytes, dict):
+                    midi_bytes = midi_bytes["bytes"]
+                events = parse_midi_from_bytes(midi_bytes)
+
+                onset, vel = compute_onset_targets(events, n_frames)
+
+                row = {
+                    "mel_spectrogram": mel.tobytes(),
+                    "onset_targets": onset.tobytes(),
+                    "velocity_targets": vel.tobytes(),
+                    "n_frames": n_frames,
+                    "n_mels": N_MELS,
+                    "n_classes": NUM_CLASSES,
+                    "sample_rate": SAMPLE_RATE,
+                    "hop_length": HOP_LENGTH,
+                    "fps": FPS,
+                    "duration": len(audio) / SAMPLE_RATE,
+                    "split": split,
+                    "style": item.get("style", "") or "",
+                    "bpm": int(item.get("bpm", 0) or 0),
+                    "drummer": item.get("drummer", "") or "",
+                    "session": item.get("session", "") or "",
+                    "beat_type": item.get("beat_type", "") or "",
+                    "time_signature": item.get("time_signature", "") or "",
+                    "kit_name": item.get("kit_name", "") or "",
+                    "source_audio": item.get("filename", "") or "",
+                }
+
+                row_bytes = (
+                    len(row["mel_spectrogram"])
+                    + len(row["onset_targets"])
+                    + len(row["velocity_targets"])
+                )
+                rows.append(row)
+                current_bytes += row_bytes
+                split_rows += 1
+
+                # Flush shard when big enough
+                if current_bytes >= max_shard_bytes:
+                    _write_shard(rows, output_dir, split, shard_idx)
+                    shard_idx += 1
+                    rows = []
+                    current_bytes = 0
+
+            except Exception as e:
+                print(f"  SKIP row {i}: {e}", file=sys.stderr)
+
+            if (i + 1) % 500 == 0:
+                print(f"  Processed {i + 1} rows ({split_rows} features so far)")
+
+        # Flush remaining rows
+        if rows:
+            _write_shard(rows, output_dir, split, shard_idx)
+            shard_idx += 1
+
+        print(f"  {split}: {split_rows} features in {shard_idx} shards")
+        total += split_rows
+
+    return total
+
+
+def process_star_streaming(
+    repo: str,
+    token: str,
+    output_dir: Path,
+    max_shard_bytes: int,
+) -> int:
+    """Download STAR files one at a time, compute features, write Parquet.
+
+    Returns total number of feature rows written.
+    """
+    api = HfApi(token=token)
+    total = 0
+
+    for split_name in ["training", "validation", "test"]:
+        split_key = "train" if split_name == "training" else split_name
+        print(f"\n=== {split_key} ===")
+
+        # List all files under this split
+        try:
+            all_files = list(api.list_repo_tree(
+                repo, repo_type="dataset",
+                path_in_repo=f"data/{split_name}",
+                recursive=True,
+            ))
+        except Exception as e:
+            print(f"  Split '{split_name}' not found: {e}")
+            continue
+
+        # Find annotation .txt files and build pairs
+        ann_files = [
+            f.path for f in all_files
+            if hasattr(f, "path") and f.path.endswith(".txt")
+            and "/annotation/" in f.path
+        ]
+
+        if not ann_files:
+            print(f"  No annotation files found for {split_name}")
+            continue
+
+        print(f"  Found {len(ann_files)} annotation files")
+
+        # Build a set of available audio files for fast lookup
+        audio_files_set = {
+            f.path for f in all_files
+            if hasattr(f, "path")
+            and "/audio/mix/" in f.path
+            and (f.path.endswith(".flac") or f.path.endswith(".wav")
+                 or f.path.endswith(".mp3"))
+        }
+
+        rows: list[dict] = []
+        current_bytes = 0
+        shard_idx = 0
+        split_rows = 0
+
+        for i, ann_path in enumerate(sorted(ann_files)):
+            # Derive expected audio path from annotation path
+            # e.g., data/training/source/annotation/track.txt
+            #     -> data/training/source/audio/mix/track.flac
+            stem = Path(ann_path).stem
+            ann_dir = str(Path(ann_path).parent)
+            # Go from .../annotation/ to .../audio/mix/
+            base_dir = ann_dir.rsplit("/annotation", 1)[0]
+            audio_path = None
+            for ext in [".flac", ".wav", ".mp3"]:
+                candidate = f"{base_dir}/audio/mix/{stem}{ext}"
+                if candidate in audio_files_set:
+                    audio_path = candidate
+                    break
+
+            if audio_path is None:
+                print(f"  SKIP {ann_path}: no matching audio file",
+                      file=sys.stderr)
+                continue
+
+            try:
+                # Download both files
+                local_ann = hf_hub_download(
+                    repo_id=repo, repo_type="dataset",
+                    filename=ann_path, token=token,
+                )
+                local_audio = hf_hub_download(
+                    repo_id=repo, repo_type="dataset",
+                    filename=audio_path, token=token,
+                )
+
+                # Process
+                audio = load_audio_mono(local_audio)
+                mel = compute_mel(audio)
+                n_frames = mel.shape[1]
+                events = parse_star_annotation(local_ann)
+                onset, vel = compute_onset_targets(events, n_frames)
+
+                # Extract source directory name
+                # e.g., data/training/MDB_Drums/annotation/...
+                parts = ann_path.split("/")
+                source = parts[2] if len(parts) > 2 else ""
+
+                row = {
+                    "mel_spectrogram": mel.tobytes(),
+                    "onset_targets": onset.tobytes(),
+                    "velocity_targets": vel.tobytes(),
+                    "n_frames": n_frames,
+                    "n_mels": N_MELS,
+                    "n_classes": NUM_CLASSES,
+                    "sample_rate": SAMPLE_RATE,
+                    "hop_length": HOP_LENGTH,
+                    "fps": FPS,
+                    "duration": len(audio) / SAMPLE_RATE,
+                    "split": split_key,
+                    "source": source,
+                    "track_id": stem,
+                    "source_audio": Path(audio_path).name,
+                }
+
+                row_bytes = (
+                    len(row["mel_spectrogram"])
+                    + len(row["onset_targets"])
+                    + len(row["velocity_targets"])
+                )
+                rows.append(row)
+                current_bytes += row_bytes
+                split_rows += 1
+
+                # Flush shard when big enough
+                if current_bytes >= max_shard_bytes:
+                    _write_shard(rows, output_dir, split_key, shard_idx)
+                    shard_idx += 1
+                    rows = []
+                    current_bytes = 0
+
+                # Clean up downloaded files to save disk space
+                try:
+                    os.remove(local_ann)
+                except OSError:
+                    pass
+                try:
+                    os.remove(local_audio)
+                except OSError:
+                    pass
+
+            except Exception as e:
+                print(f"  SKIP {ann_path}: {e}", file=sys.stderr)
+
+            if (i + 1) % 100 == 0:
+                print(f"  Processed {i + 1}/{len(ann_files)} "
+                      f"({split_rows} features so far)")
+
+        # Flush remaining rows
+        if rows:
+            _write_shard(rows, output_dir, split_key, shard_idx)
+            shard_idx += 1
+
+        print(f"  {split_key}: {split_rows} features in {shard_idx} shards")
+        total += split_rows
+
+    return total
 
 
 # ---------------------------------------------------------------------------
 # HF Hub integration
 # ---------------------------------------------------------------------------
-
-def download_dataset(repo: str, token: str) -> Path:
-    """Download the raw dataset from HF Hub to a local cache directory."""
-    print(f"Downloading {repo} from HF Hub...")
-    t0 = time.monotonic()
-    local_dir = Path(snapshot_download(
-        repo_id=repo,
-        repo_type="dataset",
-        token=token,
-        local_dir=f"/tmp/{repo.replace('/', '_')}_raw",
-    ))
-    elapsed = time.monotonic() - t0
-    print(f"Downloaded to {local_dir} ({elapsed:.1f}s)")
-    return local_dir
-
 
 def upload_features(
     repo: str,
@@ -452,6 +526,9 @@ def main() -> None:
         print("Error: HF_TOKEN environment variable is required.", file=sys.stderr)
         sys.exit(1)
 
+    max_shard_bytes = args.max_shard_mb * 1024 * 1024
+    features_dir = Path(f"/tmp/{args.repo.replace('/', '_')}_features")
+
     print(f"Dataset:  {args.dataset}")
     print(f"Repo:     {args.repo}")
     print(f"Shard MB: {args.max_shard_mb}")
@@ -459,71 +536,31 @@ def main() -> None:
           f"fps={FPS}, classes={NUM_CLASSES}")
     print()
 
-    # Step 1: Download raw dataset from HF Hub
-    raw_dir = download_dataset(args.repo, token)
-    print()
+    t0 = time.monotonic()
 
-    # Step 2: Discover entries
     if args.dataset == "egmd":
-        entries = discover_egmd_entries(raw_dir)
-        process_fn = process_egmd_entry
+        total = process_egmd_streaming(
+            args.repo, token, features_dir, max_shard_bytes,
+        )
     elif args.dataset == "star":
-        entries = discover_star_entries(raw_dir)
-        process_fn = process_star_entry
+        total = process_star_streaming(
+            args.repo, token, features_dir, max_shard_bytes,
+        )
     else:
         raise ValueError(f"Unknown dataset: {args.dataset}")
 
-    print(f"Found {len(entries)} entries")
-    if not entries:
-        print("No entries found. Check that the dataset downloaded correctly.",
-              file=sys.stderr)
+    elapsed = time.monotonic() - t0
+    print(f"\nFeature computation done: {total} rows ({elapsed:.1f}s)")
+
+    if total == 0:
+        print("No features computed. Check dataset contents.", file=sys.stderr)
         sys.exit(1)
 
-    # Group by split
-    splits: dict[str, list[dict]] = {}
-    for entry in entries:
-        s = entry["split"]
-        splits.setdefault(s, []).append(entry)
-
-    for s, s_entries in sorted(splits.items()):
-        print(f"  {s}: {len(s_entries)} entries")
     print()
-
-    # Step 3: Process each split and write parquet shards
-    features_dir = Path(f"/tmp/{args.repo.replace('/', '_')}_features")
-    max_shard_bytes = args.max_shard_mb * 1024 * 1024
-    total_processed = 0
-    total_skipped = 0
-
-    t0 = time.monotonic()
-    for split_name, split_entries in sorted(splits.items()):
-        print(f"=== Processing split: {split_name} ({len(split_entries)} entries) ===")
-        rows: list[dict] = []
-        for i, entry in enumerate(split_entries):
-            row = process_fn(entry)
-            if row is not None:
-                rows.append(row)
-            else:
-                total_skipped += 1
-
-            if (i + 1) % 500 == 0:
-                print(f"  {i + 1}/{len(split_entries)} processed ({len(rows)} ok)")
-
-        print(f"  Completed: {len(rows)} features, {total_skipped} skipped")
-        write_parquet_shards(rows, features_dir, split_name, max_shard_bytes)
-        total_processed += len(rows)
-        print()
-
-    elapsed = time.monotonic() - t0
-    print(f"Feature computation done: {total_processed} rows, "
-          f"{total_skipped} skipped ({elapsed:.1f}s)")
-    print()
-
-    # Step 4: Upload features to HF Hub
     upload_features(args.repo, features_dir, token)
 
     print()
-    print(f"All done. {total_processed} feature rows uploaded to "
+    print(f"All done. {total} feature rows uploaded to "
           f"{args.repo} (features/ config).")
 
 
