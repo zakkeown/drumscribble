@@ -2,8 +2,8 @@
 # requires-python = ">=3.11"
 # dependencies = [
 #     "drumscribble @ git+https://github.com/zakkeown/drumscribble.git",
-#     "datasets",
 #     "huggingface_hub[hf_xet]",
+#     "pyarrow",
 #     "pyyaml",
 #     "trackio",
 # ]
@@ -49,6 +49,9 @@ from huggingface_hub import HfApi
 def load_features(repo_id: str, split: str, token: str | None) -> list[dict]:
     """Load pre-computed features from an HF dataset repo.
 
+    Downloads Parquet shards from features/{split}-*.parquet and reads
+    them directly with pyarrow (bypassing datasets schema casting).
+
     Args:
         repo_id: HF dataset repo (e.g. 'schismaudio/e-gmd').
         split: Dataset split ('train' or 'validation').
@@ -58,16 +61,31 @@ def load_features(repo_id: str, split: str, token: str | None) -> list[dict]:
         List of dicts with keys: mel_spectrogram, onset_targets,
         velocity_targets, n_frames.
     """
-    import datasets
+    import pyarrow.parquet as pq
+    from huggingface_hub import HfApi, hf_hub_download
 
     print(f"Loading {repo_id} split={split}...")
-    ds = datasets.load_dataset(
-        repo_id,
-        data_files=f"features/{split}-*.parquet",
-        split="train",  # data_files loads everything as "train" split
-        token=token,
-    )
-    rows = list(ds)
+    api = HfApi(token=token)
+
+    # List all feature shards for this split
+    all_files = [
+        f for f in api.list_repo_files(repo_id, repo_type="dataset")
+        if f.startswith(f"features/{split}-") and f.endswith(".parquet")
+    ]
+    all_files.sort()
+    print(f"  Found {len(all_files)} shards")
+
+    rows = []
+    for i, filename in enumerate(all_files):
+        local_path = hf_hub_download(
+            repo_id=repo_id, repo_type="dataset",
+            filename=filename, token=token,
+        )
+        table = pq.read_table(local_path)
+        rows.extend(table.to_pylist())
+        if (i + 1) % 10 == 0:
+            print(f"  Read {i + 1}/{len(all_files)} shards ({len(rows)} rows)")
+
     print(f"  Loaded {len(rows)} rows from {repo_id}/{split}")
     return rows
 
