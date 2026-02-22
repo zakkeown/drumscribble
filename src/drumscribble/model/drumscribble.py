@@ -99,11 +99,11 @@ class DrumscribbleCNN(nn.Module):
         features = self.decoder2(features, skips[1])  # T/4 -> T/2
         features = self.decoder3(features, skips[0])  # T/2 -> T
 
-        # Output heads
+        # Output heads (raw logits — apply sigmoid at inference time)
         h = self.head_proj(features)
-        onset = torch.sigmoid(self.onset_head(h)).squeeze(2)   # (B, 26, T)
-        velocity = torch.sigmoid(self.velocity_head(h)).squeeze(2)
-        offset = torch.sigmoid(self.offset_head(h)).squeeze(2)
+        onset = self.onset_head(h).squeeze(2)      # (B, 26, T)
+        velocity = self.velocity_head(h).squeeze(2)
+        offset = self.offset_head(h).squeeze(2)
 
         return onset, velocity, offset
 

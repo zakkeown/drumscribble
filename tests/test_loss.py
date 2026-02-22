@@ -4,14 +4,15 @@ from drumscribble.loss import DrumscribbleLoss
 
 def test_loss_basic():
     loss_fn = DrumscribbleLoss()
-    onset_pred = torch.sigmoid(torch.randn(2, 26, 100))
-    vel_pred = torch.sigmoid(torch.randn(2, 26, 100))
-    offset_pred = torch.sigmoid(torch.randn(2, 26, 100))
+    # Pass raw logits (no sigmoid) — loss applies sigmoid internally
+    onset_logits = torch.randn(2, 26, 100)
+    vel_logits = torch.randn(2, 26, 100)
+    offset_logits = torch.randn(2, 26, 100)
     onset_target = torch.zeros(2, 26, 100)
     vel_target = torch.zeros(2, 26, 100)
 
     total, components = loss_fn(
-        onset_pred, vel_pred, offset_pred, onset_target, vel_target
+        onset_logits, vel_logits, offset_logits, onset_target, vel_target
     )
     assert total.dim() == 0  # scalar
     assert total.item() > 0
@@ -30,19 +31,21 @@ def test_velocity_loss_masked():
     onset_target[0, 0, 50] = 1.0
     vel_target[0, 0, 50] = 0.8
 
-    pred_onset = onset_target.clone()
-    pred_vel = torch.zeros_like(vel_target)  # wrong velocity
-    pred_offset = torch.zeros(1, 26, 100)
+    # Large positive logit = high probability onset
+    onset_logits = torch.full((1, 26, 100), -10.0)
+    onset_logits[0, 0, 50] = 10.0
+    vel_logits = torch.full((1, 26, 100), -10.0)  # ~0 after sigmoid
+    offset_logits = torch.zeros(1, 26, 100)
 
-    _, components = loss_fn(pred_onset, pred_vel, pred_offset, onset_target, vel_target)
-    # Velocity loss should be > 0 (predicted 0, target 0.8)
+    _, components = loss_fn(onset_logits, vel_logits, offset_logits, onset_target, vel_target)
+    # Velocity loss should be > 0 (predicted ~0, target 0.8)
     assert components["velocity"].item() > 0
 
 
 def test_loss_zero_when_perfect():
     loss_fn = DrumscribbleLoss()
     target = torch.zeros(1, 26, 50)
-    pred = torch.zeros(1, 26, 50)
-    total, _ = loss_fn(pred, pred, pred, target, target)
-    # BCE(0,0) should be very small
+    # Large negative logits -> sigmoid ~0 -> matches zero target
+    logits = torch.full((1, 26, 50), -10.0)
+    total, _ = loss_fn(logits, logits, logits, target, target)
     assert total.item() < 0.01

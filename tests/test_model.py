@@ -36,13 +36,16 @@ def test_model_output_shape_30s():
     assert onset.shape == (1, NUM_CLASSES, 1875)
 
 
-def test_model_outputs_are_probabilities():
+def test_model_outputs_are_logits():
+    """Model returns raw logits; sigmoid applied at inference time."""
     model = DrumscribbleCNN()
     x = torch.randn(1, 1, 128, 200)
     onset, velocity, offset = model(x)
-    assert onset.min() >= 0 and onset.max() <= 1
-    assert velocity.min() >= 0 and velocity.max() <= 1
-    assert offset.min() >= 0 and offset.max() <= 1
+    # Logits can be any real value (not clamped to [0, 1])
+    assert onset.dtype == torch.float32
+    # Applying sigmoid gives valid probabilities
+    probs = onset.sigmoid()
+    assert probs.min() >= 0 and probs.max() <= 1
 
 
 def test_model_with_mert():
