@@ -100,6 +100,7 @@ def train_one_epoch(
     scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None,
     scaler: Optional[torch.amp.GradScaler] = None,
     ema: Optional[EMAModel] = None,
+    amp_dtype: Optional[torch.dtype] = None,
 ) -> float:
     """Train for one epoch.
 
@@ -111,8 +112,10 @@ def train_one_epoch(
         device: Device string.
         grad_clip: Max gradient norm for clipping.
         scheduler: Optional LR scheduler (stepped per batch).
-        scaler: Optional GradScaler for CUDA AMP.
+        scaler: Optional GradScaler for CUDA AMP (float16 only).
         ema: Optional EMA model tracker.
+        amp_dtype: AMP dtype (e.g. torch.bfloat16). If set, uses autocast
+            without GradScaler. Takes precedence over scaler.
 
     Returns:
         Average loss for the epoch.
@@ -121,7 +124,8 @@ def train_one_epoch(
     total_loss = 0.0
     n_batches = 0
 
-    use_amp = scaler is not None
+    use_scaler = scaler is not None and amp_dtype is None
+    use_autocast = amp_dtype is not None
 
     for mel, onset_target, vel_target in tqdm(loader, desc="Training", leave=False):
         mel = mel.to(device)
@@ -131,7 +135,18 @@ def train_one_epoch(
         if mel.dim() == 3:
             mel = mel.unsqueeze(1)
 
-        if use_amp:
+        if use_autocast:
+            with torch.amp.autocast(device, dtype=amp_dtype):
+                onset_pred, vel_pred, offset_pred = model(mel)
+                loss, _ = loss_fn(
+                    onset_pred, vel_pred, offset_pred, onset_target, vel_target
+                )
+
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            optimizer.step()
+        elif use_scaler:
             with torch.amp.autocast("cuda"):
                 onset_pred, vel_pred, offset_pred = model(mel)
                 loss, _ = loss_fn(

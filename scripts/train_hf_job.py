@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#     "drumscribble @ git+https://github.com/zakkeown/drumscribble.git@cce6c7a",
+#     "drumscribble @ git+https://github.com/zakkeown/drumscribble.git@214a56e",
 #     "huggingface_hub[hf_xet]",
 #     "pyarrow",
 #     "pyyaml",
@@ -298,10 +298,10 @@ def main():
 
     ema = EMAModel(model, decay=0.999)
 
-    # --- AMP ---
-    scaler = torch.amp.GradScaler("cuda") if device == "cuda" else None
-    if scaler:
-        print("Using CUDA AMP")
+    # --- AMP (bfloat16 — same throughput as float16 on A10G, no overflow risk) ---
+    amp_dtype = torch.bfloat16 if device == "cuda" else None
+    if amp_dtype:
+        print(f"Using CUDA AMP with {amp_dtype}")
 
     # --- Resume ---
     start_epoch = 0
@@ -318,8 +318,6 @@ def main():
             optimizer.load_state_dict(ckpt["optimizer"])
         if "scheduler" in ckpt:
             scheduler.load_state_dict(ckpt["scheduler"])
-        if "scaler" in ckpt and scaler is not None:
-            scaler.load_state_dict(ckpt["scaler"])
         start_epoch = ckpt.get("epoch", 0)
         print(f"Resumed from epoch {start_epoch}")
 
@@ -358,7 +356,8 @@ def main():
     for epoch in range(start_epoch, args.epochs):
         avg_loss = train_one_epoch(
             model, loader, optimizer, loss_fn,
-            device=device, scheduler=scheduler, scaler=scaler, ema=ema,
+            device=device, scheduler=scheduler, ema=ema,
+            amp_dtype=amp_dtype,
         )
         lr_now = optimizer.param_groups[0]["lr"]
         print(f"Epoch {epoch+1}/{args.epochs} | loss={avg_loss:.4f} | lr={lr_now:.2e}")
@@ -386,8 +385,6 @@ def main():
                 "epoch": epoch + 1,
                 "val_f1": val_metrics["val_f1"],
             }
-            if scaler is not None:
-                ckpt_data["scaler"] = scaler.state_dict()
             torch.save(ckpt_data, ckpt_path)
             print(f"  Saved {ckpt_path}")
 
