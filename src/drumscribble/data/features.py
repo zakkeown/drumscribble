@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import random
+from collections import defaultdict
+
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 
 from drumscribble.config import N_MELS, NUM_CLASSES
 
@@ -109,7 +112,10 @@ class ParquetFeaturesDataset(Dataset):
                 for c in range(n_chunks):
                     self.chunks.append((meta_idx, c * chunk_frames))
 
-        # Per-worker shard cache (one shard table at a time)
+        self._reset_cache()
+
+    def _reset_cache(self) -> None:
+        """Clear the shard cache. Called on init and by worker_init_fn."""
         self._cached_shard_idx: int = -1
         self._cached_table = None
 
@@ -128,8 +134,50 @@ class ParquetFeaturesDataset(Dataset):
         row = self._cached_table.slice(row_in_shard, 1)
         return {col: row.column(col)[0].as_py() for col in self._FEATURE_COLS}
 
+    @staticmethod
+    def worker_init_fn(worker_id: int) -> None:
+        """DataLoader worker_init_fn — resets shard cache after fork."""
+        import torch.utils.data as data
+
+        ds = data.get_worker_info().dataset
+        if isinstance(ds, ParquetFeaturesDataset):
+            ds._reset_cache()
+
+    def shard_for_chunk(self, chunk_idx: int) -> int:
+        """Return the shard index for a given chunk index."""
+        meta_idx, _ = self.chunks[chunk_idx]
+        return self.row_meta[meta_idx][0]
+
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         meta_idx, base_start = self.chunks[idx]
         shard_idx, row_in_shard, n_frames = self.row_meta[meta_idx]
         row = self._read_row(shard_idx, row_in_shard)
         return _extract_chunk(row, n_frames, base_start, self.chunk_frames)
+
+
+class ShardGroupedSampler(Sampler[int]):
+    """Sampler that groups chunk indices by shard to minimize Parquet I/O.
+
+    Shuffles the order of shards each epoch, and shuffles chunks within
+    each shard, but processes all chunks from one shard before moving to
+    the next. This reduces shard reads from O(N) to O(num_shards).
+    """
+
+    def __init__(self, dataset: ParquetFeaturesDataset) -> None:
+        self.dataset = dataset
+        # Group chunk indices by shard
+        self._shard_groups: dict[int, list[int]] = defaultdict(list)
+        for chunk_idx in range(len(dataset)):
+            shard_idx = dataset.shard_for_chunk(chunk_idx)
+            self._shard_groups[shard_idx].append(chunk_idx)
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __iter__(self):
+        shards = list(self._shard_groups.keys())
+        random.shuffle(shards)
+        for shard_idx in shards:
+            indices = self._shard_groups[shard_idx].copy()
+            random.shuffle(indices)
+            yield from indices

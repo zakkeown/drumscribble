@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#     "drumscribble @ git+https://github.com/zakkeown/drumscribble.git@feat/hf-dataset-ecosystem",
+#     "drumscribble @ git+https://github.com/zakkeown/drumscribble.git@cce6c7a",
 #     "huggingface_hub[hf_xet]",
 #     "pyarrow",
 #     "pyyaml",
@@ -236,7 +236,7 @@ def main():
     from torch.utils.data import DataLoader
 
     from drumscribble.data.augment import SpecAugment
-    from drumscribble.data.features import ParquetFeaturesDataset
+    from drumscribble.data.features import ParquetFeaturesDataset, ShardGroupedSampler
     from drumscribble.loss import DrumscribbleLoss
     from drumscribble.model.drumscribble import DrumscribbleCNN
     from drumscribble.train import (
@@ -279,9 +279,12 @@ def main():
     dataset = ParquetFeaturesDataset(train_shards, chunk_frames=chunk_frames)
     print(f"Training chunks: {len(dataset):,}")
 
+    sampler = ShardGroupedSampler(dataset)
     loader = DataLoader(
-        dataset, batch_size=args.batch_size, shuffle=True,
+        dataset, batch_size=args.batch_size, sampler=sampler,
         num_workers=args.num_workers, drop_last=True, collate_fn=collate_fn,
+        worker_init_fn=ParquetFeaturesDataset.worker_init_fn,
+        persistent_workers=args.num_workers > 0,
     )
 
     # --- Optimizer ---
