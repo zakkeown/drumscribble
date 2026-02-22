@@ -43,6 +43,9 @@ import os
 import sys
 from pathlib import Path
 
+# Force unbuffered stdout so HF Jobs logs stream in real-time
+sys.stdout.reconfigure(line_buffering=True)
+
 import torch
 from huggingface_hub import HfApi
 
