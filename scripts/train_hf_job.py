@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#     "drumscribble @ git+https://github.com/zakkeown/drumscribble.git@214a56e",
+#     "drumscribble @ git+https://github.com/zakkeown/drumscribble.git@a1b3f99",
 #     "huggingface_hub[hf_xet]",
 #     "pyarrow",
 #     "pyyaml",
@@ -120,7 +120,7 @@ def validate(
         print("  WARNING: No validation chunks available")
         return {"val_f1": 0.0, "val_precision": 0.0, "val_recall": 0.0}
 
-    val_loader = DataLoader(val_ds, batch_size=16, shuffle=False, num_workers=2)
+    val_loader = DataLoader(val_ds, batch_size=16, shuffle=False, num_workers=0)
 
     all_ref_events: list[dict] = []
     all_est_events: list[dict] = []
@@ -179,7 +179,7 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--chunk-seconds", type=float, default=10.0,
                         help="Duration of each training chunk in seconds")
-    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--egmd-repo", type=str, default="schismaudio/e-gmd")
     parser.add_argument("--star-repo", type=str, default="zkeown/star-drums")
     parser.add_argument("--output-repo", type=str, default="schismaudio/drumscribble-checkpoints")
@@ -360,7 +360,9 @@ def main():
             amp_dtype=amp_dtype,
         )
         lr_now = optimizer.param_groups[0]["lr"]
-        print(f"Epoch {epoch+1}/{args.epochs} | loss={avg_loss:.4f} | lr={lr_now:.2e}")
+        import resource
+        rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+        print(f"Epoch {epoch+1}/{args.epochs} | loss={avg_loss:.4f} | lr={lr_now:.2e} | rss={rss_mb:.0f}MB")
 
         trackio.log({"loss": avg_loss, "lr": lr_now, "epoch": epoch + 1})
 
@@ -396,6 +398,12 @@ def main():
                 token=token,
             )
             print(f"  Uploaded checkpoint to {args.output_repo}")
+
+            # Free checkpoint memory and delete local file
+            del ckpt_data
+            ckpt_path.unlink(missing_ok=True)
+            import gc; gc.collect()
+            torch.cuda.empty_cache() if device == "cuda" else None
 
     # --- Save final with EMA weights ---
     ema.apply(model)
