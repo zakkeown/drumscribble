@@ -24,8 +24,8 @@ def apply_rir(
     """
     wet = fftconvolve(audio, rir, mode="full")[: len(audio)]
     # Normalize wet to match dry RMS to prevent volume jumps
-    dry_rms = np.sqrt(np.mean(audio ** 2) + 1e-8)
-    wet_rms = np.sqrt(np.mean(wet ** 2) + 1e-8)
+    dry_rms = np.sqrt(np.mean(audio ** 2)) + 1e-8
+    wet_rms = np.sqrt(np.mean(wet ** 2)) + 1e-8
     wet = wet * (dry_rms / wet_rms)
     return ((1.0 - wet_mix) * audio + wet_mix * wet).astype(np.float32)
 

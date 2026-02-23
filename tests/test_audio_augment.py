@@ -1,5 +1,4 @@
 import numpy as np
-import pytest
 
 
 def _sine(freq=440.0, dur=1.0, sr=16000):
