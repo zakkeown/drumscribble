@@ -552,15 +552,22 @@ def write_and_upload_shard(
         from huggingface_hub import HfApi
         token = os.environ.get("HF_TOKEN")
         api = HfApi(token=token)
-        api.upload_file(
-            path_or_fileobj=str(filepath),
-            path_in_repo=f"features/{filename}",
-            repo_id=output_repo,
-            repo_type="dataset",
-        )
-        print(f"  Uploaded {filename} to {output_repo}")
-        os.unlink(filepath)
-        print(f"  Deleted local {filename}")
+        uploaded = False
+        try:
+            api.upload_file(
+                path_or_fileobj=str(filepath),
+                path_in_repo=f"features/{filename}",
+                repo_id=output_repo,
+                repo_type="dataset",
+            )
+            uploaded = True
+            print(f"  Uploaded {filename} to {output_repo}")
+        except Exception as e:
+            print(f"  WARNING: Upload failed for {filename}: {e}")
+            print(f"  Keeping local file for retry.")
+        if uploaded:
+            os.unlink(filepath)
+            print(f"  Deleted local {filename}")
 
     return filename
 
@@ -586,13 +593,25 @@ def load_wav_files(wav_paths: list[Path]) -> list[np.ndarray]:
 
 
 def log_rss(prefix: str = "") -> float:
-    """Log current RSS memory usage and return value in MB."""
-    rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    # macOS reports bytes, Linux reports KB
-    if sys.platform == "darwin":
-        rss_mb = rss_mb / (1024 * 1024)
+    """Log current RSS memory usage and return value in MB.
+
+    On Linux, reads /proc/self/status for current (not peak) RSS.
+    On macOS, falls back to peak RSS via resource module.
+    """
+    rss_mb = 0.0
+    if sys.platform == "linux":
+        try:
+            with open("/proc/self/status") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        rss_mb = int(line.split()[1]) / 1024  # KB -> MB
+                        break
+        except OSError:
+            rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    elif sys.platform == "darwin":
+        rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 * 1024)
     else:
-        rss_mb = rss_mb / 1024
+        rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
     print(f"{prefix}RSS: {rss_mb:.0f} MB")
     return rss_mb
 
