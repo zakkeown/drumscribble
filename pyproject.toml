@@ -31,6 +31,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 markers = [
     "slow: marks tests as slow (e.g. model downloads, GPU training)",
 ]
