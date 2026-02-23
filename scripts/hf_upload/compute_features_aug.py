@@ -762,8 +762,8 @@ def main():
     # ------------------------------------------------------------------
     print("\nLoading RIR files...")
     rir_paths = sorted(
-        list((rir_dir / "RIRS_NOISES" / "real_rirs_isotropic_noises").rglob("*.wav"))
-        + list((rir_dir / "RIRS_NOISES" / "simulated_rirs").rglob("*.wav"))
+        list((rir_dir / "real_rirs_isotropic_noises").rglob("*.wav"))
+        + list((rir_dir / "simulated_rirs").rglob("*.wav"))
     )
     print(f"  Found {len(rir_paths)} RIR files")
     rirs = load_wav_files(rir_paths)
@@ -772,7 +772,7 @@ def main():
 
     print("\nLoading noise files...")
     noise_paths = sorted(
-        list((rir_dir / "RIRS_NOISES" / "pointsource_noises").rglob("*.wav"))
+        list((rir_dir / "pointsource_noises").rglob("*.wav"))
     )
     print(f"  Found {len(noise_paths)} noise files")
     noises = load_wav_files(noise_paths)
