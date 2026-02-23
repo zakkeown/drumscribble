@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#     "drumscribble @ git+https://github.com/zakkeown/drumscribble.git@d4d4221",
+#     "drumscribble @ git+https://github.com/zakkeown/drumscribble.git@482207d",
 #     "huggingface_hub[hf_xet]",
 #     "pyarrow",
 #     "pyyaml",
@@ -91,16 +91,75 @@ def download_shards(repo_id: str, split: str, token: str | None) -> list[str]:
     return paths
 
 
+_VALIDATE_SCRIPT = r"""
+import json, sys, torch
+import numpy as np
+import pyarrow.parquet as pq
+from drumscribble.model.drumscribble import DrumscribbleCNN
+from drumscribble.config import FPS, GM_CLASSES, N_MELS, NUM_CLASSES
+from drumscribble.evaluate import evaluate_events
+from drumscribble.inference import detections_to_events
+
+config_path, result_path = sys.argv[1], sys.argv[2]
+with open(config_path) as f:
+    cfg = json.load(f)
+device = cfg["device"]
+chunk_frames = cfg["chunk_frames"]
+val_shards = cfg["val_shards"]
+model_path = cfg["model_path"]
+
+model = DrumscribbleCNN(
+    backbone_dims=(64, 128, 256, 384),
+    backbone_depths=(5, 5, 5, 5),
+    num_attn_layers=3, num_attn_heads=4,
+).to(device)
+model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
+model.eval()
+
+all_ref, all_est = [], []
+with torch.no_grad():
+    for shard_path in val_shards:
+        table = pq.read_table(shard_path,
+            columns=["mel_spectrogram", "onset_targets", "velocity_targets", "n_frames"])
+        for row_idx in range(table.num_rows):
+            n_frames = table.column("n_frames")[row_idx].as_py()
+            if n_frames < chunk_frames:
+                continue
+            mel = np.frombuffer(table.column("mel_spectrogram")[row_idx].as_py(),
+                dtype=np.float32).reshape(N_MELS, n_frames)
+            onset = np.frombuffer(table.column("onset_targets")[row_idx].as_py(),
+                dtype=np.float32).reshape(NUM_CLASSES, n_frames)
+            for start in range(0, n_frames - chunk_frames + 1, chunk_frames):
+                mel_t = torch.from_numpy(mel[:, start:start+chunk_frames].copy()
+                    ).unsqueeze(0).unsqueeze(0).to(device)
+                onset_t = torch.from_numpy(onset[:, start:start+chunk_frames].copy())
+                onset_pred, vel_pred, _ = model(mel_t)
+                for cls_idx in range(NUM_CLASSES):
+                    frames = torch.where(onset_t[cls_idx] >= 1.0)[0]
+                    for f_val in frames:
+                        all_ref.append({"time": f_val.item() / FPS, "note": GM_CLASSES[cls_idx]})
+                all_est.extend(detections_to_events(
+                    onset_pred[0].sigmoid(), vel_pred[0].sigmoid(), threshold=0.5, fps=FPS))
+        del table
+
+metrics = evaluate_events(all_ref, all_est)
+with open(result_path, "w") as f:
+    json.dump({"val_f1": metrics["f1"], "val_precision": metrics["precision"],
+               "val_recall": metrics["recall"]}, f)
+"""
+
+
 def validate(
     model: torch.nn.Module,
     val_shards: list[str],
     device: str,
     chunk_frames: int,
 ) -> dict[str, float]:
-    """Run validation and compute micro-averaged onset F1.
+    """Run validation in a subprocess to prevent pyarrow memory leaks.
 
-    Reads shards one at a time, extracting chunks and running inference
-    per-shard to avoid holding all validation data in memory at once.
+    Pyarrow's memory allocator does not return freed memory to the OS,
+    so repeated in-process validation causes RSS to grow until OOM.
+    Running in a subprocess guarantees all memory is reclaimed on exit.
 
     Args:
         model: DrumscribbleCNN (should already have EMA weights applied).
@@ -111,78 +170,53 @@ def validate(
     Returns:
         Dict with val_f1, val_precision, val_recall.
     """
-    import gc
+    import json
+    import subprocess
+    import tempfile
 
-    import numpy as np
-    import pyarrow.parquet as pq
+    fallback = {"val_f1": 0.0, "val_precision": 0.0, "val_recall": 0.0}
 
-    from drumscribble.config import FPS, GM_CLASSES, N_MELS, NUM_CLASSES
-    from drumscribble.evaluate import evaluate_events
-    from drumscribble.inference import detections_to_events
+    # Save model weights and config to temp files
+    with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
+        model_path = f.name
+        torch.save(model.state_dict(), f)
 
-    all_ref_events: list[dict] = []
-    all_est_events: list[dict] = []
+    config_path = model_path + ".config.json"
+    result_path = model_path + ".result.json"
+    script_path = model_path + ".validate.py"
 
-    model.eval()
-    with torch.no_grad():
-        for shard_path in val_shards:
-            table = pq.read_table(
-                shard_path,
-                columns=["mel_spectrogram", "onset_targets", "velocity_targets", "n_frames"],
-            )
+    with open(config_path, "w") as f:
+        json.dump({
+            "model_path": model_path,
+            "val_shards": val_shards,
+            "device": device,
+            "chunk_frames": chunk_frames,
+        }, f)
 
-            for row_idx in range(table.num_rows):
-                n_frames = table.column("n_frames")[row_idx].as_py()
-                if n_frames < chunk_frames:
-                    continue
+    with open(script_path, "w") as f:
+        f.write(_VALIDATE_SCRIPT)
 
-                mel = np.frombuffer(
-                    table.column("mel_spectrogram")[row_idx].as_py(), dtype=np.float32
-                ).reshape(N_MELS, n_frames)
-                onset = np.frombuffer(
-                    table.column("onset_targets")[row_idx].as_py(), dtype=np.float32
-                ).reshape(NUM_CLASSES, n_frames)
+    try:
+        result = subprocess.run(
+            [sys.executable, script_path, config_path, result_path],
+            capture_output=True, text=True, timeout=600,
+        )
+        if result.returncode != 0:
+            stderr_tail = result.stderr[-500:] if result.stderr else "no stderr"
+            print(f"  Validation subprocess failed (rc={result.returncode}): {stderr_tail}")
+            return fallback
 
-                # Process non-overlapping chunks from this row
-                for start in range(0, n_frames - chunk_frames + 1, chunk_frames):
-                    mel_t = torch.from_numpy(
-                        mel[:, start : start + chunk_frames].copy()
-                    ).unsqueeze(0).unsqueeze(0).to(device)  # (1, 1, N_MELS, T)
-                    onset_t = torch.from_numpy(
-                        onset[:, start : start + chunk_frames].copy()
-                    )
-
-                    onset_pred, vel_pred, _ = model(mel_t)
-
-                    # Reference events
-                    for cls_idx in range(NUM_CLASSES):
-                        frames = torch.where(onset_t[cls_idx] >= 1.0)[0]
-                        for f in frames:
-                            all_ref_events.append({
-                                "time": f.item() / FPS,
-                                "note": GM_CLASSES[cls_idx],
-                            })
-
-                    # Estimated events
-                    est_events = detections_to_events(
-                        onset_pred[0].sigmoid(),
-                        vel_pred[0].sigmoid(),
-                        threshold=0.5,
-                        fps=FPS,
-                    )
-                    all_est_events.extend(est_events)
-
-            # Free shard memory before loading next
-            del table
-            gc.collect()
-
-    # Compute micro-averaged metrics
-    metrics = evaluate_events(all_ref_events, all_est_events)
-    return {
-        "val_f1": metrics["f1"],
-        "val_precision": metrics["precision"],
-        "val_recall": metrics["recall"],
-    }
+        with open(result_path) as f:
+            return json.load(f)
+    except subprocess.TimeoutExpired:
+        print("  Validation subprocess timed out (600s)")
+        return fallback
+    except Exception as e:
+        print(f"  Validation error: {e}")
+        return fallback
+    finally:
+        for p in [model_path, config_path, result_path, script_path]:
+            Path(p).unlink(missing_ok=True)
 
 
 def main():
@@ -384,8 +418,10 @@ def main():
 
         # Save checkpoint and run validation every 10 epochs
         if (epoch + 1) % 10 == 0:
-            # --- Validation with EMA weights (subset to limit memory) ---
+            # --- Validation with EMA weights (subprocess to prevent memory leaks) ---
             import gc; gc.collect()
+            if device == "cuda":
+                torch.cuda.empty_cache()
             ema.apply(model)
             val_metrics = validate(model, val_shards[:3], device, chunk_frames)
             ema.restore(model)
