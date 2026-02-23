@@ -696,24 +696,54 @@ def main():
     print()
 
     # ------------------------------------------------------------------
-    # Step 1: Download raw dataset from HF Hub
+    # Step 1: Download raw dataset
     # ------------------------------------------------------------------
+    # HF Hub repos only have auto-converted Parquet, not raw audio.
+    # E-GMD: download original zip from Google Cloud Storage.
+    # STAR: download from zkeown/star-drums (private, has raw audio in
+    #       HF datasets Parquet format — we extract audio from it).
     from huggingface_hub import snapshot_download
 
     token = os.environ.get("HF_TOKEN")
 
     if args.dataset == "egmd":
-        print("Downloading E-GMD dataset...")
-        dataset_dir = Path(snapshot_download(
-            "schismaudio/e-gmd", repo_type="dataset", token=token,
-        ))
+        egmd_url = "https://storage.googleapis.com/magentadata/datasets/e-gmd/v1.0.0/e-gmd-v1.0.0.zip"
+        egmd_zip = Path("/tmp/e-gmd-v1.0.0.zip")
+        egmd_dir = Path("/tmp/e-gmd")
+
+        if not egmd_dir.exists() or not list(egmd_dir.rglob("*.wav")):
+            import subprocess
+            print(f"Downloading E-GMD from {egmd_url} ...")
+            subprocess.run(
+                ["curl", "-L", "--progress-bar", "-o", str(egmd_zip), egmd_url],
+                check=True,
+            )
+            print(f"  Downloaded: {egmd_zip.stat().st_size / (1024**3):.1f} GB")
+            print("Extracting E-GMD...")
+            egmd_dir.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["unzip", "-q", str(egmd_zip), "-d", str(egmd_dir)], check=True)
+            egmd_zip.unlink()  # Free ~90GB
+            print("  Extracted and deleted zip.")
+
+        # Find the actual data dir (may be nested, e.g. /tmp/e-gmd/e-gmd-v1.0.0/)
+        subdirs = [d for d in egmd_dir.iterdir() if d.is_dir()]
+        dataset_dir = subdirs[0] if len(subdirs) == 1 else egmd_dir
         print(f"  E-GMD at: {dataset_dir}")
+
     elif args.dataset == "star":
-        print("Downloading STAR Drums dataset...")
-        dataset_dir = Path(snapshot_download(
-            "schismaudio/star-drums", repo_type="dataset", token=token,
-        ))
-        print(f"  STAR at: {dataset_dir}")
+        # STAR has raw audio in the HF datasets Parquet format at zkeown/star-drums.
+        # But we need raw FLAC + TSV. Check if user has a local copy first.
+        star_local = Path.home() / "Documents" / "Datasets" / "star-drums"
+        if star_local.exists():
+            dataset_dir = star_local
+            print(f"  STAR (local) at: {dataset_dir}")
+        else:
+            # Download raw STAR from HF Hub (private repo, needs token)
+            print("Downloading STAR Drums dataset...")
+            dataset_dir = Path(snapshot_download(
+                "zkeown/star-drums", repo_type="dataset", token=token,
+            ))
+            print(f"  STAR at: {dataset_dir}")
 
     log_rss("After dataset download | ")
 
