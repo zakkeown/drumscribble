@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#     "drumscribble @ git+https://github.com/zakkeown/drumscribble.git@a1b3f99",
+#     "drumscribble @ git+https://github.com/zakkeown/drumscribble.git@9845e6a",
 #     "huggingface_hub[hf_xet]",
 #     "pyarrow",
 #     "pyyaml",
@@ -99,6 +99,9 @@ def validate(
 ) -> dict[str, float]:
     """Run validation and compute micro-averaged onset F1.
 
+    Reads shards one at a time, extracting chunks and running inference
+    per-shard to avoid holding all validation data in memory at once.
+
     Args:
         model: DrumscribbleCNN (should already have EMA weights applied).
         val_shards: List of local Parquet shard paths for validation.
@@ -108,57 +111,70 @@ def validate(
     Returns:
         Dict with val_f1, val_precision, val_recall.
     """
-    from torch.utils.data import DataLoader
+    import gc
 
-    from drumscribble.config import FPS, GM_CLASSES
-    from drumscribble.data.features import ParquetFeaturesDataset
+    import numpy as np
+    import pyarrow.parquet as pq
+
+    from drumscribble.config import FPS, GM_CLASSES, N_MELS, NUM_CLASSES
     from drumscribble.evaluate import evaluate_events
     from drumscribble.inference import detections_to_events
-
-    val_ds = ParquetFeaturesDataset(val_shards, chunk_frames=chunk_frames)
-    if len(val_ds) == 0:
-        print("  WARNING: No validation chunks available")
-        return {"val_f1": 0.0, "val_precision": 0.0, "val_recall": 0.0}
-
-    val_loader = DataLoader(val_ds, batch_size=16, shuffle=False, num_workers=0)
 
     all_ref_events: list[dict] = []
     all_est_events: list[dict] = []
 
     model.eval()
     with torch.no_grad():
-        for mel, onset_target, vel_target in val_loader:
-            mel = mel.to(device)
-            onset_target = onset_target.to(device)
+        for shard_path in val_shards:
+            table = pq.read_table(
+                shard_path,
+                columns=["mel_spectrogram", "onset_targets", "velocity_targets", "n_frames"],
+            )
 
-            if mel.dim() == 3:
-                mel = mel.unsqueeze(1)
+            for row_idx in range(table.num_rows):
+                n_frames = table.column("n_frames")[row_idx].as_py()
+                if n_frames < chunk_frames:
+                    continue
 
-            onset_pred, vel_pred, _ = model(mel)
+                mel = np.frombuffer(
+                    table.column("mel_spectrogram")[row_idx].as_py(), dtype=np.float32
+                ).reshape(N_MELS, n_frames)
+                onset = np.frombuffer(
+                    table.column("onset_targets")[row_idx].as_py(), dtype=np.float32
+                ).reshape(NUM_CLASSES, n_frames)
 
-            # Process each example in the batch
-            for i in range(mel.shape[0]):
-                # Reference events: peaks in onset_target where target >= 1.0
-                ref_events = []
-                ot = onset_target[i]  # (NUM_CLASSES, T)
-                for cls_idx in range(ot.shape[0]):
-                    frames = torch.where(ot[cls_idx] >= 1.0)[0]
-                    for f in frames:
-                        ref_events.append({
-                            "time": f.item() / FPS,
-                            "note": GM_CLASSES[cls_idx],
-                        })
+                # Process non-overlapping chunks from this row
+                for start in range(0, n_frames - chunk_frames + 1, chunk_frames):
+                    mel_t = torch.from_numpy(
+                        mel[:, start : start + chunk_frames].copy()
+                    ).unsqueeze(0).unsqueeze(0).to(device)  # (1, 1, N_MELS, T)
+                    onset_t = torch.from_numpy(
+                        onset[:, start : start + chunk_frames].copy()
+                    )
 
-                # Estimated events via inference pipeline
-                est_events = detections_to_events(
-                    onset_pred[i].sigmoid(),
-                    vel_pred[i].sigmoid(),
-                    threshold=0.5,
-                    fps=FPS,
-                )
+                    onset_pred, vel_pred, _ = model(mel_t)
 
-                all_ref_events.extend(ref_events)
-                all_est_events.extend(est_events)
+                    # Reference events
+                    for cls_idx in range(NUM_CLASSES):
+                        frames = torch.where(onset_t[cls_idx] >= 1.0)[0]
+                        for f in frames:
+                            all_ref_events.append({
+                                "time": f.item() / FPS,
+                                "note": GM_CLASSES[cls_idx],
+                            })
+
+                    # Estimated events
+                    est_events = detections_to_events(
+                        onset_pred[0].sigmoid(),
+                        vel_pred[0].sigmoid(),
+                        threshold=0.5,
+                        fps=FPS,
+                    )
+                    all_est_events.extend(est_events)
+
+            # Free shard memory before loading next
+            del table
+            gc.collect()
 
     # Compute micro-averaged metrics
     metrics = evaluate_events(all_ref_events, all_est_events)
