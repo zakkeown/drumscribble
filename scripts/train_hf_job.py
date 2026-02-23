@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#     "drumscribble @ git+https://github.com/zakkeown/drumscribble.git@9845e6a",
+#     "drumscribble @ git+https://github.com/zakkeown/drumscribble.git@d4d4221",
 #     "huggingface_hub[hf_xet]",
 #     "pyarrow",
 #     "pyyaml",
@@ -300,7 +300,7 @@ def main():
         dataset, batch_size=args.batch_size, sampler=sampler,
         num_workers=args.num_workers, drop_last=True, collate_fn=collate_fn,
         worker_init_fn=ParquetFeaturesDataset.worker_init_fn,
-        persistent_workers=args.num_workers > 0,
+        persistent_workers=False,
     )
 
     # --- Optimizer ---
@@ -384,9 +384,10 @@ def main():
 
         # Save checkpoint and run validation every 10 epochs
         if (epoch + 1) % 10 == 0:
-            # --- Validation with EMA weights ---
+            # --- Validation with EMA weights (subset to limit memory) ---
+            import gc; gc.collect()
             ema.apply(model)
-            val_metrics = validate(model, val_shards, device, chunk_frames)
+            val_metrics = validate(model, val_shards[:3], device, chunk_frames)
             ema.restore(model)
 
             print(f"  Val F1={val_metrics['val_f1']:.4f} | "
@@ -424,8 +425,9 @@ def main():
     # --- Save final with EMA weights ---
     ema.apply(model)
 
-    # Final validation
-    final_metrics = validate(model, val_shards, device, chunk_frames)
+    # Final validation (subset to limit memory)
+    import gc; gc.collect()
+    final_metrics = validate(model, val_shards[:3], device, chunk_frames)
     print(f"\nFinal Val F1={final_metrics['val_f1']:.4f} | "
           f"P={final_metrics['val_precision']:.4f} | "
           f"R={final_metrics['val_recall']:.4f}")
