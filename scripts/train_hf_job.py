@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#     "drumscribble @ git+https://github.com/zakkeown/drumscribble.git@ec6e198",
+#     "drumscribble @ git+https://github.com/zakkeown/drumscribble.git@b08b569",
 #     "huggingface_hub[hf_xet]",
 #     "pyarrow",
 #     "pyyaml",
