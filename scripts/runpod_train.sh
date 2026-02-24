@@ -42,19 +42,19 @@ echo "This may take 30-60 min on first run (cache hits on subsequent runs)."
 echo ""
 
 echo "--- E-GMD augmented (train) ---"
-huggingface-cli download schismaudio/e-gmd-aug --repo-type dataset \
+hf download schismaudio/e-gmd-aug --repo-type dataset \
     --include "features/*" --local-dir /workspace/data/e-gmd-aug
 
 echo "--- STAR augmented (train) ---"
-huggingface-cli download schismaudio/star-drums-aug --repo-type dataset \
+hf download schismaudio/star-drums-aug --repo-type dataset \
     --include "features/*" --local-dir /workspace/data/star-drums-aug
 
 echo "--- E-GMD (validation only) ---"
-huggingface-cli download schismaudio/e-gmd --repo-type dataset \
+hf download schismaudio/e-gmd --repo-type dataset \
     --include "features/validation-*" --local-dir /workspace/data/e-gmd-val
 
 echo "--- STAR (validation only) ---"
-huggingface-cli download zkeown/star-drums --repo-type dataset \
+hf download zkeown/star-drums --repo-type dataset \
     --include "features/validation-*" --local-dir /workspace/data/star-drums-val
 
 echo ""
