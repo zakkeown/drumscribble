@@ -31,6 +31,8 @@ echo "uv: $(uv --version)"
 # --- Install huggingface-cli with xet support ---
 echo "=== Installing huggingface_hub[hf_xet] ==="
 pip install -q "huggingface_hub[hf_xet]"
+# Ensure pip-installed scripts are on PATH
+export PATH="$(python3 -c 'import sysconfig; print(sysconfig.get_path(\"scripts\"))'):$PATH"
 
 # --- Pre-cache HF shards to persistent volume ---
 # Setting HF_HOME to /workspace ensures cache persists across pod restarts.
