@@ -229,7 +229,7 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--chunk-seconds", type=float, default=10.0,
                         help="Duration of each training chunk in seconds")
-    parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--egmd-repo", type=str, default="schismaudio/e-gmd")
     parser.add_argument("--star-repo", type=str, default="zkeown/star-drums")
     parser.add_argument("--egmd-val-repo", type=str, default=None,
@@ -433,29 +433,16 @@ def main():
 
         # Save checkpoint and run validation every 10 epochs
         if (epoch + 1) % 10 == 0:
-            # --- Validation with EMA weights (subprocess to prevent memory leaks) ---
-            import gc; gc.collect()
-            if device == "cuda":
-                torch.cuda.empty_cache()
+            # --- Save checkpoint FIRST (before val, in case val OOMs) ---
             ema.apply(model)
-            val_metrics = validate(model, val_shards[:3], device, chunk_frames)
-            ema.restore(model)
-
-            print(f"  Val F1={val_metrics['val_f1']:.4f} | "
-                  f"P={val_metrics['val_precision']:.4f} | "
-                  f"R={val_metrics['val_recall']:.4f}")
-            trackio.log(val_metrics)
-
-            # --- Save checkpoint ---
             ckpt_path = output_dir / f"checkpoint_epoch{epoch+1}.pt"
-            ckpt_data = {
+            torch.save({
                 "model": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "scheduler": scheduler.state_dict(),
                 "epoch": epoch + 1,
-                "val_f1": val_metrics["val_f1"],
-            }
-            torch.save(ckpt_data, ckpt_path)
+            }, ckpt_path)
+            ema.restore(model)
             print(f"  Saved {ckpt_path}")
 
             api.upload_file(
@@ -466,19 +453,30 @@ def main():
                 token=token,
             )
             print(f"  Uploaded checkpoint to {args.output_repo}")
-
-            # Free checkpoint memory and delete local file
-            del ckpt_data
             ckpt_path.unlink(missing_ok=True)
+
+            # --- Validation with EMA weights (subprocess to limit memory) ---
+            import gc; gc.collect()
+            if device == "cuda":
+                torch.cuda.empty_cache()
+            ema.apply(model)
+            val_metrics = validate(model, val_shards[:1], device, chunk_frames)
+            ema.restore(model)
+
+            print(f"  Val F1={val_metrics['val_f1']:.4f} | "
+                  f"P={val_metrics['val_precision']:.4f} | "
+                  f"R={val_metrics['val_recall']:.4f}")
+            trackio.log(val_metrics)
+
             import gc; gc.collect()
             torch.cuda.empty_cache() if device == "cuda" else None
 
     # --- Save final with EMA weights ---
     ema.apply(model)
 
-    # Final validation (subset to limit memory)
+    # Final validation (1 shard to limit memory)
     import gc; gc.collect()
-    final_metrics = validate(model, val_shards[:3], device, chunk_frames)
+    final_metrics = validate(model, val_shards[:1], device, chunk_frames)
     print(f"\nFinal Val F1={final_metrics['val_f1']:.4f} | "
           f"P={final_metrics['val_precision']:.4f} | "
           f"R={final_metrics['val_recall']:.4f}")
