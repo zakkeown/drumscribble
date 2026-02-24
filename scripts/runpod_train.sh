@@ -24,8 +24,8 @@ nvidia-smi
 if ! command -v uv &> /dev/null; then
     echo "=== Installing uv ==="
     curl -LsSf https://astral.sh/uv/install.sh | sh
-    source "$HOME/.local/bin/env"
 fi
+export PATH="$HOME/.local/bin:$PATH"
 echo "uv: $(uv --version)"
 
 # --- Install huggingface-cli with xet support ---
@@ -61,12 +61,12 @@ echo ""
 echo "=== Download complete ==="
 echo ""
 
-# --- Launch training in tmux ---
+# --- Launch training ---
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
-tmux new-session -d -s train "\
-    export HF_TOKEN='${HF_TOKEN}' && \
+TRAIN_CMD="export HF_TOKEN='${HF_TOKEN}' && \
     export HF_HOME=/workspace/hf_cache && \
+    export PATH=\"\$HOME/.local/bin:\$PATH\" && \
     cd ${REPO_DIR} && \
     uv run scripts/train_hf_job.py \
         --dataset multi \
@@ -81,9 +81,14 @@ tmux new-session -d -s train "\
         --resume-from final.pt \
     2>&1 | tee /workspace/train.log"
 
-echo "=== Training started in tmux session 'train' ==="
-echo ""
-echo "  Attach:   tmux attach -t train"
-echo "  Detach:   Ctrl+B, D"
-echo "  Logs:     tail -f /workspace/train.log"
-echo ""
+if command -v tmux &> /dev/null; then
+    tmux new-session -d -s train "$TRAIN_CMD"
+    echo "=== Training started in tmux session 'train' ==="
+    echo ""
+    echo "  Attach:   tmux attach -t train"
+    echo "  Detach:   Ctrl+B, D"
+    echo "  Logs:     tail -f /workspace/train.log"
+else
+    echo "=== Starting training (no tmux — running directly) ==="
+    eval "$TRAIN_CMD"
+fi
