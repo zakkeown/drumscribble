@@ -241,6 +241,9 @@ def main():
                         help="Weights for multi-dataset mode [egmd, star]")
     parser.add_argument("--resume-from", type=str, default=None,
                         help="Checkpoint filename in output repo (e.g. checkpoint_epoch10.pt)")
+    parser.add_argument("--finetune", action="store_true",
+                        help="Fine-tune mode: load model weights only, skip optimizer/scheduler "
+                             "restoration. Use with --resume-from for domain adaptation.")
     parser.add_argument("--run-name", type=str, default=None,
                         help="Trackio run name (default: auto-generated)")
     parser.add_argument("--trackio-space", type=str, default=None,
@@ -371,12 +374,17 @@ def main():
         )
         ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
         model.load_state_dict(ckpt["model"])
-        if "optimizer" in ckpt:
-            optimizer.load_state_dict(ckpt["optimizer"])
-        if "scheduler" in ckpt:
-            scheduler.load_state_dict(ckpt["scheduler"])
-        start_epoch = ckpt.get("epoch", 0)
-        print(f"Resumed from epoch {start_epoch}")
+        if args.finetune:
+            # Fine-tune mode: only load model weights, fresh optimizer/scheduler
+            print(f"Fine-tune mode: loaded model weights from epoch {ckpt.get('epoch', '?')}, "
+                  f"fresh optimizer/scheduler (lr={args.lr})")
+        else:
+            if "optimizer" in ckpt:
+                optimizer.load_state_dict(ckpt["optimizer"])
+            if "scheduler" in ckpt:
+                scheduler.load_state_dict(ckpt["scheduler"])
+            start_epoch = ckpt.get("epoch", 0)
+            print(f"Resumed from epoch {start_epoch}")
 
     # --- Trackio ---
     import trackio
