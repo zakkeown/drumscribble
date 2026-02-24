@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#     "drumscribble @ git+https://github.com/zakkeown/drumscribble.git@482207d",
+#     "drumscribble @ git+https://github.com/zakkeown/drumscribble.git@7663a7d",
 #     "huggingface_hub[hf_xet]",
 #     "pyarrow",
 #     "pyyaml",
@@ -232,6 +232,10 @@ def main():
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--egmd-repo", type=str, default="schismaudio/e-gmd")
     parser.add_argument("--star-repo", type=str, default="zkeown/star-drums")
+    parser.add_argument("--egmd-val-repo", type=str, default=None,
+                        help="Validation repo for E-GMD (defaults to --egmd-repo)")
+    parser.add_argument("--star-val-repo", type=str, default=None,
+                        help="Validation repo for STAR (defaults to --star-repo)")
     parser.add_argument("--output-repo", type=str, default="schismaudio/drumscribble-checkpoints")
     parser.add_argument("--dataset-weights", type=float, nargs=2, default=[0.5, 0.5],
                         help="Weights for multi-dataset mode [egmd, star]")
@@ -264,13 +268,16 @@ def main():
     train_shards: list[str] = []
     val_shards: list[str] = []
 
+    egmd_val_repo = args.egmd_val_repo or args.egmd_repo
+    star_val_repo = args.star_val_repo or args.star_repo
+
     if args.dataset in ("egmd", "multi"):
         train_shards.extend(download_shards(args.egmd_repo, "train", token))
-        val_shards.extend(download_shards(args.egmd_repo, "validation", token))
+        val_shards.extend(download_shards(egmd_val_repo, "validation", token))
 
     if args.dataset in ("star", "multi"):
         train_shards.extend(download_shards(args.star_repo, "train", token))
-        val_shards.extend(download_shards(args.star_repo, "validation", token))
+        val_shards.extend(download_shards(star_val_repo, "validation", token))
 
     print(f"Train shards: {len(train_shards)}")
     print(f"Val shards: {len(val_shards)}")
