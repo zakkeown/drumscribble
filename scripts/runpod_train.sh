@@ -74,6 +74,7 @@ TRAIN_CMD="export HF_TOKEN='${HF_TOKEN}' && \
         --lr 1e-4 \
         --finetune \
         --num-workers 2 \
+        --data-dir /workspace/data \
         --egmd-repo schismaudio/e-gmd-aug \
         --egmd-val-repo schismaudio/e-gmd \
         --star-repo schismaudio/star-drums-aug \

@@ -50,7 +50,7 @@ import torch
 from huggingface_hub import HfApi
 
 
-def download_shards(repo_id: str, split: str, token: str | None) -> list[str]:
+def download_shards(repo_id: str, split: str, token: str | None, local_dir: str | None = None) -> list[str]:
     """Download feature Parquet shards and return local file paths.
 
     Downloads shards from features/{split}-*.parquet via hf_hub_download
@@ -61,10 +61,24 @@ def download_shards(repo_id: str, split: str, token: str | None) -> list[str]:
         repo_id: HF dataset repo (e.g. 'schismaudio/e-gmd').
         split: Dataset split ('train' or 'validation').
         token: HF API token (needed for private repos).
+        local_dir: If set, look for shards in this local directory instead
+            of downloading via hf_hub_download. Expects files at
+            ``{local_dir}/features/{split}-*.parquet``.
 
     Returns:
         List of local file paths to downloaded Parquet shards.
     """
+    import glob as _glob
+
+    # --- Try local directory first ---
+    if local_dir is not None:
+        pattern = os.path.join(local_dir, "features", f"{split}-*.parquet")
+        paths = sorted(_glob.glob(pattern))
+        if paths:
+            print(f"Using {len(paths)} local shards for {repo_id} split={split} from {local_dir}")
+            return paths
+        print(f"  Warning: no shards at {pattern}, falling back to download")
+
     from huggingface_hub import HfApi, hf_hub_download
 
     print(f"Downloading shards for {repo_id} split={split}...")
@@ -244,6 +258,11 @@ def main():
     parser.add_argument("--finetune", action="store_true",
                         help="Fine-tune mode: load model weights only, skip optimizer/scheduler "
                              "restoration. Use with --resume-from for domain adaptation.")
+    parser.add_argument("--data-dir", type=str, default=None,
+                        help="Root directory with pre-downloaded shards. "
+                             "Expects subdirectories matching repo names "
+                             "(e.g. data-dir/e-gmd-aug/features/train-*.parquet). "
+                             "Skips hf_hub_download when local files are found.")
     parser.add_argument("--run-name", type=str, default=None,
                         help="Trackio run name (default: auto-generated)")
     parser.add_argument("--trackio-space", type=str, default=None,
@@ -274,13 +293,28 @@ def main():
     egmd_val_repo = args.egmd_val_repo or args.egmd_repo
     star_val_repo = args.star_val_repo or args.star_repo
 
+    def _local_dir(repo_id: str, is_val: bool = False) -> str | None:
+        """Resolve local directory for a repo under --data-dir."""
+        if args.data_dir is None:
+            return None
+        # Try repo name directly (e.g. "e-gmd-aug"), then with -val suffix
+        name = repo_id.split("/")[-1]
+        candidate = os.path.join(args.data_dir, name + ("-val" if is_val else ""))
+        if os.path.isdir(candidate):
+            return candidate
+        # Fall back to plain name without -val suffix
+        candidate = os.path.join(args.data_dir, name)
+        if os.path.isdir(candidate):
+            return candidate
+        return None
+
     if args.dataset in ("egmd", "multi"):
-        train_shards.extend(download_shards(args.egmd_repo, "train", token))
-        val_shards.extend(download_shards(egmd_val_repo, "validation", token))
+        train_shards.extend(download_shards(args.egmd_repo, "train", token, _local_dir(args.egmd_repo)))
+        val_shards.extend(download_shards(egmd_val_repo, "validation", token, _local_dir(egmd_val_repo, is_val=True)))
 
     if args.dataset in ("star", "multi"):
-        train_shards.extend(download_shards(args.star_repo, "train", token))
-        val_shards.extend(download_shards(star_val_repo, "validation", token))
+        train_shards.extend(download_shards(args.star_repo, "train", token, _local_dir(args.star_repo)))
+        val_shards.extend(download_shards(star_val_repo, "validation", token, _local_dir(star_val_repo, is_val=True)))
 
     print(f"Train shards: {len(train_shards)}")
     print(f"Val shards: {len(val_shards)}")
