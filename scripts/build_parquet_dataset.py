@@ -14,7 +14,6 @@ Usage:
         --skip-download
 """
 import argparse
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -25,7 +24,6 @@ from tqdm import tqdm
 
 
 EGMD_URL = "https://storage.googleapis.com/magentadata/datasets/e-gmd/v1.0.0/e-gmd-v1.0.0.zip"
-EGMD_SHA256 = "7d9a264fb4c9eabd9fec09d5f8e333192f529b1a1b845d170279a977ac436053"
 
 STAR_ZENODO_RECORD = "15690078"
 STAR_PARTS = [
@@ -73,10 +71,11 @@ def download_star(dest: Path) -> Path:
     combined = dest / "STAR_Drums_full.zip"
     if not combined.exists():
         print("Combining STAR parts...")
-        subprocess.run(
-            f"cat {dest}/STAR_Drums_full.zip.part-* > {combined}",
-            shell=True, check=True,
-        )
+        with open(combined, "wb") as out:
+            for part in sorted(dest.glob("STAR_Drums_full.zip.part-*")):
+                with open(part, "rb") as f:
+                    while chunk := f.read(8192):
+                        out.write(chunk)
 
     star_root = dest / "STAR_Drums"
     if not star_root.exists():
