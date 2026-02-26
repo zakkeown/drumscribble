@@ -18,6 +18,11 @@ class ParquetDataset(TorchDataset):
         if source is not None:
             hf_dataset = hf_dataset.filter(lambda row: row["source"] == source)
         self.dataset = hf_dataset
+        if len(self.dataset) == 0:
+            raise ValueError(
+                f"Dataset is empty after filtering (source={source!r}). "
+                "Check that the source value matches the data."
+            )
         # Infer frame count from first row
         mel_len = len(self.dataset[0]["mel"])
         self.n_frames = mel_len // N_MELS

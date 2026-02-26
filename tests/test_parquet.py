@@ -48,6 +48,11 @@ def test_parquet_dataset_no_filter(fake_hf_dataset):
     assert len(ds) == 10
 
 
+def test_parquet_dataset_filter_unknown_source(fake_hf_dataset):
+    with pytest.raises(ValueError, match="empty after filtering"):
+        ParquetDataset(fake_hf_dataset, source="nonexistent")
+
+
 def test_parquet_dataset_works_with_dataloader(fake_hf_dataset):
     from torch.utils.data import DataLoader
     ds = ParquetDataset(fake_hf_dataset)
