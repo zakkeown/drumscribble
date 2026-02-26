@@ -22,3 +22,4 @@ training:
 data:
   egmd_root: ~/Documents/Datasets/e-gmd
   star_root: ~/Documents/Datasets/star-drums
+  hf_dataset_repo: zkeown/drumscribble-mel-specs

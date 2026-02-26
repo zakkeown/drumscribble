@@ -9,6 +9,7 @@ from torch.utils.data import DataLoader
 from drumscribble.data.augment import SpecAugment
 from drumscribble.data.egmd import EGMDDataset
 from drumscribble.data.multi import MultiDatasetLoader
+from drumscribble.data.parquet import ParquetDataset
 from drumscribble.data.star import STARDataset
 from drumscribble.loss import DrumscribbleLoss
 from drumscribble.model.drumscribble import DrumscribbleCNN
@@ -35,13 +36,16 @@ class AugmentCollate:
         return mel_batch, onset_batch, vel_batch
 
 
-def build_dataset(dataset_name: str, data_cfg: dict, train_cfg: dict):
+def build_dataset(dataset_name: str, data_cfg: dict, train_cfg: dict,
+                  hf_dataset: str | None = None, parquet_source: str | None = None):
     """Build dataset(s) based on config.
 
     Args:
-        dataset_name: One of "egmd", "star", or "multi".
+        dataset_name: One of "egmd", "star", "multi", or "parquet".
         data_cfg: Data configuration dict with root paths.
         train_cfg: Training configuration dict.
+        hf_dataset: HF Hub dataset repo for parquet mode (overrides config).
+        parquet_source: Filter parquet dataset by source.
 
     Returns:
         Dataset or list of datasets for multi mode.
@@ -72,6 +76,11 @@ def build_dataset(dataset_name: str, data_cfg: dict, train_cfg: dict):
             chunk_seconds=chunk_seconds,
         )
         return [egmd, star]
+    elif dataset_name == "parquet":
+        from datasets import load_dataset
+        repo = hf_dataset or data_cfg.get("hf_dataset_repo", "zkeown/drumscribble-mel-specs")
+        hf_ds = load_dataset(repo, split="train")
+        return ParquetDataset(hf_ds, source=parquet_source)
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
@@ -86,7 +95,7 @@ def main():
         "--dataset",
         type=str,
         default=None,
-        choices=["egmd", "star", "multi"],
+        choices=["egmd", "star", "multi", "parquet"],
         help="Dataset to use (overrides config)",
     )
     parser.add_argument(
@@ -94,6 +103,19 @@ def main():
         type=str,
         default=None,
         help="Path to checkpoint to resume training from",
+    )
+    parser.add_argument(
+        "--hf-dataset",
+        type=str,
+        default=None,
+        help="HF Hub dataset repo for parquet mode (overrides config)",
+    )
+    parser.add_argument(
+        "--parquet-source",
+        type=str,
+        default=None,
+        choices=["egmd", "star"],
+        help="Filter parquet dataset by source",
     )
     args = parser.parse_args()
 
@@ -135,7 +157,8 @@ def main():
     num_workers = 0 if device == "mps" else train_cfg["num_workers"]
 
     if dataset_name == "multi":
-        datasets = build_dataset("multi", data_cfg, train_cfg)
+        datasets = build_dataset("multi", data_cfg, train_cfg,
+                                 hf_dataset=args.hf_dataset, parquet_source=args.parquet_source)
         weights = train_cfg.get("dataset_weights", [0.5, 0.5])
         multi_loader = MultiDatasetLoader(
             datasets=datasets,
@@ -158,7 +181,8 @@ def main():
         for i, ds in enumerate(datasets):
             print(f"  Dataset {i}: {len(ds):,} samples, weight={weights[i]}")
     else:
-        dataset = build_dataset(dataset_name, data_cfg, train_cfg)
+        dataset = build_dataset(dataset_name, data_cfg, train_cfg,
+                                hf_dataset=args.hf_dataset, parquet_source=args.parquet_source)
         print(f"Training samples ({dataset_name}): {len(dataset):,}")
         loader = DataLoader(
             dataset,
