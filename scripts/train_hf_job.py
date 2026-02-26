@@ -4,6 +4,7 @@
 #     "drumscribble @ git+https://github.com/zakkeown/drumscribble.git",
 #     "huggingface_hub[hf_xet]",
 #     "pyyaml",
+#     "datasets>=3.0",
 # ]
 # ///
 """HF Jobs training script for DrumscribbleCNN.
@@ -73,8 +74,8 @@ def extract_tars(data_dir: str) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description="Train DrumscribbleCNN on HF Jobs")
-    parser.add_argument("--dataset", type=str, default="egmd",
-                        choices=["egmd", "star", "multi"],
+    parser.add_argument("--dataset", type=str, default="parquet",
+                        choices=["egmd", "star", "multi", "parquet"],
                         help="Dataset to train on")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=32)
@@ -86,6 +87,11 @@ def main():
     parser.add_argument("--output-repo", type=str, default="zkeown/drumscribble-checkpoints")
     parser.add_argument("--dataset-weights", type=float, nargs=2, default=[0.5, 0.5],
                         help="Weights for multi-dataset mode [egmd, star]")
+    parser.add_argument("--hf-dataset", type=str, default="zkeown/drumscribble-mel-specs",
+                        help="HF Hub dataset repo for parquet mode")
+    parser.add_argument("--parquet-source", type=str, default=None,
+                        choices=["egmd", "star"],
+                        help="Filter parquet dataset by source")
     parser.add_argument("--resume-from", type=str, default=None,
                         help="Checkpoint filename in output repo (e.g. checkpoint_epoch10.pt)")
     args = parser.parse_args()
@@ -208,6 +214,20 @@ def main():
         )
         total = len(egmd_ds) + len(star_ds)
         print(f"Multi-dataset total: {total:,} samples")
+
+    elif args.dataset == "parquet":
+        from datasets import load_dataset as hf_load_dataset
+        from drumscribble.data.parquet import ParquetDataset
+
+        print(f"Loading parquet dataset from {args.hf_dataset}...")
+        hf_ds = hf_load_dataset(args.hf_dataset, split="train")
+        dataset = ParquetDataset(hf_ds, source=args.parquet_source)
+        src_label = f" (source={args.parquet_source})" if args.parquet_source else ""
+        print(f"Parquet training samples{src_label}: {len(dataset):,}")
+        loader = DataLoader(
+            dataset, batch_size=args.batch_size, shuffle=True,
+            num_workers=args.num_workers, drop_last=True, collate_fn=collate_fn,
+        )
 
     # --- Optimizer ---
     optimizer = create_optimizer(model, lr=args.lr, weight_decay=0.05)
