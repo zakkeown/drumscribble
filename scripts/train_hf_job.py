@@ -87,8 +87,9 @@ def main():
     parser.add_argument("--output-repo", type=str, default="zkeown/drumscribble-checkpoints")
     parser.add_argument("--dataset-weights", type=float, nargs=2, default=[0.5, 0.5],
                         help="Weights for multi-dataset mode [egmd, star]")
-    parser.add_argument("--hf-dataset", type=str, default="zkeown/drumscribble-mel-specs",
-                        help="HF Hub dataset repo for parquet mode")
+    parser.add_argument("--hf-dataset", type=str,
+                        default="schismaudio/e-gmd-aug,schismaudio/star-drums-aug",
+                        help="Comma-separated HF Hub dataset repos for parquet mode")
     parser.add_argument("--parquet-source", type=str, default=None,
                         choices=["egmd", "star"],
                         help="Filter parquet dataset by source")
@@ -216,12 +217,17 @@ def main():
         print(f"Multi-dataset total: {total:,} samples")
 
     elif args.dataset == "parquet":
+        from datasets import concatenate_datasets as hf_concat
         from datasets import load_dataset as hf_load_dataset
+
         from drumscribble.data.parquet import ParquetDataset
 
-        print(f"Loading parquet dataset from {args.hf_dataset}...")
-        hf_ds = hf_load_dataset(args.hf_dataset, split="train")
-        dataset = ParquetDataset(hf_ds, source=args.parquet_source)
+        repos = [r.strip() for r in args.hf_dataset.split(",")]
+        print(f"Loading parquet datasets: {repos}")
+        parts = [hf_load_dataset(repo, split="train") for repo in repos]
+        hf_ds = hf_concat(parts) if len(parts) > 1 else parts[0]
+        dataset = ParquetDataset(hf_ds, source=args.parquet_source,
+                                 split="train", chunk_seconds=chunk_seconds)
         src_label = f" (source={args.parquet_source})" if args.parquet_source else ""
         print(f"Parquet training samples{src_label}: {len(dataset):,}")
         loader = DataLoader(

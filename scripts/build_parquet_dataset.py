@@ -14,13 +14,17 @@ Usage:
         --skip-download
 """
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 import torch
-from datasets import Dataset, DatasetDict
+from torch.utils.data import DataLoader
+from datasets import Dataset, DatasetDict, concatenate_datasets
 from tqdm import tqdm
+
+NUM_WORKERS = max(1, os.cpu_count() - 2)  # leave 2 cores free
 
 
 EGMD_URL = "https://storage.googleapis.com/magentadata/datasets/e-gmd/v1.0.0/e-gmd-v1.0.0.zip"
@@ -85,28 +89,39 @@ def download_star(dest: Path) -> Path:
     return star_root
 
 
-def process_dataset(dataset, source: str, split: str) -> dict:
-    """Extract all chunks from a dataset into flat row dicts."""
-    rows = {"mel": [], "onset_target": [], "vel_target": [], "source": []}
-    print(f"Processing {source}/{split}: {len(dataset)} chunks...")
+def process_dataset(dataset, source: str, split: str, num_workers: int = NUM_WORKERS) -> Dataset | None:
+    """Process a PyTorch dataset into an HF Dataset, streaming to disk via from_generator."""
+    total = len(dataset)
+    print(f"Processing {source}/{split}: {total} chunks with {num_workers} workers...")
 
-    for idx in tqdm(range(len(dataset)), desc=f"{source}/{split}"):
-        mel, onset, vel = dataset[idx]
-        rows["mel"].append(mel.flatten().tolist())
-        rows["onset_target"].append(onset.flatten().tolist())
-        rows["vel_target"].append(vel.flatten().tolist())
-        rows["source"].append(source)
+    if total == 0:
+        print(f"  {source}/{split}: skipped (0 chunks)")
+        return None
 
-    return rows
+    def gen():
+        loader = DataLoader(
+            dataset,
+            batch_size=num_workers * 4,
+            num_workers=num_workers,
+            shuffle=False,
+            prefetch_factor=4,
+        )
+        for mel_batch, onset_batch, vel_batch in tqdm(loader, desc=f"{source}/{split}"):
+            b = mel_batch.shape[0]
+            mel_np = mel_batch.reshape(b, -1).numpy()
+            onset_np = onset_batch.reshape(b, -1).numpy()
+            vel_np = vel_batch.reshape(b, -1).numpy()
+            for i in range(b):
+                yield {
+                    "mel": mel_np[i],
+                    "onset_target": onset_np[i],
+                    "vel_target": vel_np[i],
+                    "source": source,
+                }
 
-
-def merge_rows(*row_dicts: dict) -> dict:
-    """Merge multiple row dicts into one."""
-    merged = {"mel": [], "onset_target": [], "vel_target": [], "source": []}
-    for rd in row_dicts:
-        for key in merged:
-            merged[key].extend(rd[key])
-    return merged
+    ds = Dataset.from_generator(gen)
+    print(f"  {source}/{split}: {len(ds):,} rows written to cache")
+    return ds
 
 
 def main():
@@ -123,6 +138,8 @@ def main():
     parser.add_argument("--chunk-seconds", type=float, default=10.0)
     parser.add_argument("--private", action="store_true",
                         help="Make the HF dataset repo private")
+    parser.add_argument("--num-workers", type=int, default=NUM_WORKERS,
+                        help=f"Number of DataLoader workers (default: {NUM_WORKERS})")
     args = parser.parse_args()
 
     download_dir = Path(args.download_dir).expanduser()
@@ -139,39 +156,41 @@ def main():
     from drumscribble.data.egmd import EGMDDataset
     from drumscribble.data.star import STARDataset
 
-    # --- Process E-GMD ---
-    train_rows = []
-    val_rows = []
+    # --- Process datasets into HF Datasets (streamed to disk) ---
+    train_parts: list[Dataset] = []
+    val_parts: list[Dataset] = []
 
     if egmd_root:
         print(f"\n=== E-GMD from {egmd_root} ===")
         egmd_train = EGMDDataset(egmd_root, split="train", chunk_seconds=args.chunk_seconds)
         egmd_val = EGMDDataset(egmd_root, split="validation", chunk_seconds=args.chunk_seconds)
-        train_rows.append(process_dataset(egmd_train, "egmd", "train"))
-        val_rows.append(process_dataset(egmd_val, "egmd", "validation"))
+        if ds := process_dataset(egmd_train, "egmd", "train", args.num_workers):
+            train_parts.append(ds)
+        if ds := process_dataset(egmd_val, "egmd", "validation", args.num_workers):
+            val_parts.append(ds)
 
-    # --- Process STAR ---
     if star_root:
         print(f"\n=== STAR from {star_root} ===")
         star_train = STARDataset(star_root, split="training", chunk_seconds=args.chunk_seconds)
         star_val = STARDataset(star_root, split="validation", chunk_seconds=args.chunk_seconds)
-        train_rows.append(process_dataset(star_train, "star", "train"))
-        val_rows.append(process_dataset(star_val, "star", "validation"))
+        if ds := process_dataset(star_train, "star", "train", args.num_workers):
+            train_parts.append(ds)
+        if ds := process_dataset(star_val, "star", "validation", args.num_workers):
+            val_parts.append(ds)
 
-    if not train_rows:
+    if not train_parts:
         print("ERROR: No datasets processed. Provide --egmd-root or --star-root, or allow downloads.")
         sys.exit(1)
 
     # --- Build HF DatasetDict ---
-    train_merged = merge_rows(*train_rows)
-    val_merged = merge_rows(*val_rows) if val_rows else None
+    train_ds = concatenate_datasets(train_parts) if len(train_parts) > 1 else train_parts[0]
+    print(f"\nTrain rows: {len(train_ds):,}")
+    splits = {"train": train_ds}
 
-    print(f"\nTrain rows: {len(train_merged['mel']):,}")
-    splits = {"train": Dataset.from_dict(train_merged)}
-
-    if val_merged and val_merged["mel"]:
-        print(f"Validation rows: {len(val_merged['mel']):,}")
-        splits["validation"] = Dataset.from_dict(val_merged)
+    if val_parts:
+        val_ds = concatenate_datasets(val_parts) if len(val_parts) > 1 else val_parts[0]
+        print(f"Validation rows: {len(val_ds):,}")
+        splits["validation"] = val_ds
 
     dataset_dict = DatasetDict(splits)
 
@@ -182,4 +201,5 @@ def main():
 
 
 if __name__ == "__main__":
+    torch.multiprocessing.set_start_method("spawn")
     main()

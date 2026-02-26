@@ -77,10 +77,14 @@ def build_dataset(dataset_name: str, data_cfg: dict, train_cfg: dict,
         )
         return [egmd, star]
     elif dataset_name == "parquet":
-        from datasets import load_dataset
-        repo = hf_dataset or data_cfg.get("hf_dataset_repo", "zkeown/drumscribble-mel-specs")
-        hf_ds = load_dataset(repo, split="train")
-        return ParquetDataset(hf_ds, source=parquet_source)
+        from datasets import load_dataset, concatenate_datasets
+        repos = hf_dataset or data_cfg.get("hf_dataset_repo", "schismaudio/e-gmd-aug,schismaudio/star-drums-aug")
+        parts = []
+        for repo in repos.split(","):
+            repo = repo.strip()
+            parts.append(load_dataset(repo, split="train"))
+        hf_ds = concatenate_datasets(parts) if len(parts) > 1 else parts[0]
+        return ParquetDataset(hf_ds, source=parquet_source, split="train", chunk_seconds=chunk_seconds)
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
