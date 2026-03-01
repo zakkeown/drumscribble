@@ -132,3 +132,45 @@ def test_dataloader_batching(shard_root):
     assert mel_batch.shape == (2, N_MELS, 625)
     assert onset_batch.shape == (2, NUM_CLASSES, 625)
     assert vel_batch.shape == (2, NUM_CLASSES, 625)
+
+
+def test_training_loop(shard_root):
+    """Full training loop with WebDataset pipeline."""
+    from drumscribble.data.webdataset_loader import create_webdataset_pipeline
+    from drumscribble.data.augment import SpecAugment
+    from drumscribble.model.drumscribble import DrumscribbleCNN
+    from drumscribble.loss import DrumscribbleLoss
+    from drumscribble.train import train_one_epoch, create_optimizer
+
+    augment = SpecAugment()
+
+    def collate_fn(batch):
+        mels, onsets, vels = zip(*batch)
+        mel_batch = torch.stack(mels)
+        onset_batch = torch.stack(onsets)
+        vel_batch = torch.stack(vels)
+        mel_batch = augment(mel_batch)
+        return mel_batch, onset_batch, vel_batch
+
+    pipeline = create_webdataset_pipeline(
+        shard_root=shard_root,
+        datasets=["egmd_upload"],
+        split="train",
+        shuffle=False,
+        epoch_size=4,
+    )
+    loader = torch.utils.data.DataLoader(
+        pipeline, batch_size=2, num_workers=0, collate_fn=collate_fn,
+    )
+
+    model = DrumscribbleCNN(
+        backbone_dims=(32, 32, 32, 32),
+        backbone_depths=(1, 1, 1, 1),
+        num_attn_layers=1,
+    )
+    optimizer = create_optimizer(model, lr=1e-3)
+    loss_fn = DrumscribbleLoss()
+
+    avg_loss = train_one_epoch(model, loader, optimizer, loss_fn, device="cpu")
+    assert avg_loss > 0
+    assert not torch.isnan(torch.tensor(avg_loss))
