@@ -118,6 +118,8 @@ def create_webdataset_pipeline(
         (mel, onset_targets, velocity_targets) tensor tuples,
         each with exactly int(chunk_seconds * FPS) time frames.
     """
+    # TODO: For multi-dataset training with different sizes, add
+    # webdataset.RandomMix support with per-dataset weights.
     shards = discover_shards(shard_root, datasets, split)
     chunk_frames = int(chunk_seconds * FPS)
 

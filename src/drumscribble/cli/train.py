@@ -126,9 +126,9 @@ def main():
     epochs = args.epochs if args.epochs is not None else train_cfg["epochs"]
 
     # --- Scheduler ---
-    # WebDataset IterableDataset doesn't have len(); estimate from config
-    # E-GMD has ~35k training samples; adjust if using more datasets
-    estimated_batches = 35000 // train_cfg["batch_size"]
+    # WebDataset IterableDataset doesn't have len(); use config estimate
+    estimated_samples = data_cfg.get("estimated_samples", 35000)
+    estimated_batches = estimated_samples // train_cfg["batch_size"]
     warmup_epochs = train_cfg.get("warmup_epochs", 5)
     warmup_steps = warmup_epochs * estimated_batches
     total_steps = epochs * estimated_batches

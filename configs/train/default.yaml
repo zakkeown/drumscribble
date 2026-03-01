@@ -21,3 +21,4 @@ data:
   datasets:
     - egmd_upload
   shuffle_buffer: 5000
+  estimated_samples: 35000  # ~E-GMD training set size; used for scheduler step count

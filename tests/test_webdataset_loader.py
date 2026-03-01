@@ -109,6 +109,27 @@ def test_pipeline_chunks_variable_length(shard_root):
     assert len(samples) == 10
 
 
+def test_pipeline_pads_short_samples(tmp_path):
+    """Samples shorter than chunk_frames should be zero-padded."""
+    train_dir = tmp_path / "egmd_upload" / "data" / "features" / "train"
+    train_dir.mkdir(parents=True)
+    _make_shard(train_dir / "feature-shard-00000.tar",
+                keys=["short_0"], n_frames=200)
+
+    from drumscribble.data.webdataset_loader import create_webdataset_pipeline
+
+    pipeline = create_webdataset_pipeline(
+        shard_root=tmp_path, datasets=["egmd_upload"],
+        split="train", shuffle=False,
+    )
+    samples = list(pipeline)
+    assert len(samples) == 1
+    mel, onset, vel = samples[0]
+    assert mel.shape == (N_MELS, 625)
+    # Last 425 frames should be zero (padding)
+    assert mel[:, 200:].abs().sum() == 0
+
+
 def test_pipeline_validation_split(shard_root):
     """3 validation samples of 1500 frames -> 2 chunks each = 6."""
     from drumscribble.data.webdataset_loader import create_webdataset_pipeline
