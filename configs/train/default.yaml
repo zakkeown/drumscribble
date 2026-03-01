@@ -20,5 +20,6 @@ data:
   shard_root: ~/Documents/Datasets/build
   datasets:
     - egmd_upload
+    - star-drums
   shuffle_buffer: 5000
-  estimated_samples: 35000  # ~E-GMD training set size; used for scheduler step count
+  estimated_samples: 41000  # ~35k E-GMD + ~6k STAR; used for scheduler step count
