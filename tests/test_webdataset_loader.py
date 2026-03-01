@@ -43,16 +43,23 @@ def _make_shard(path: Path, keys: list[str], n_frames: int = 625) -> None:
 
 @pytest.fixture
 def shard_root(tmp_path):
-    """Create a fake shard_root with egmd_upload structure."""
+    """Create a fake shard_root with egmd_upload structure.
+
+    Uses variable-length recordings (1500 frames = 2 chunks + remainder)
+    to test chunking. 5 samples * 2 chunks each = 10 chunks for training.
+    3 validation samples * 2 chunks each = 6 chunks.
+    """
     train_dir = tmp_path / "egmd_upload" / "data" / "features" / "train"
     train_dir.mkdir(parents=True)
     _make_shard(train_dir / "feature-shard-00000.tar",
-                keys=[f"sample_{i}" for i in range(5)])
+                keys=[f"sample_{i}" for i in range(5)],
+                n_frames=1500)  # 2 full chunks of 625 + 250 remainder (dropped)
 
     val_dir = tmp_path / "egmd_upload" / "data" / "features" / "validation"
     val_dir.mkdir(parents=True)
     _make_shard(val_dir / "feature-shard-00000.tar",
-                keys=[f"val_{i}" for i in range(3)])
+                keys=[f"val_{i}" for i in range(3)],
+                n_frames=1500)
     return tmp_path
 
 
@@ -79,7 +86,6 @@ def test_pipeline_shapes(shard_root):
         datasets=["egmd_upload"],
         split="train",
         shuffle=False,
-        epoch_size=5,
     )
     sample = next(iter(pipeline))
     mel, onset, vel = sample
@@ -89,7 +95,8 @@ def test_pipeline_shapes(shard_root):
     assert mel.dtype == torch.float32
 
 
-def test_pipeline_iterates_all_samples(shard_root):
+def test_pipeline_chunks_variable_length(shard_root):
+    """5 samples of 1500 frames -> 2 chunks each (625 remainder dropped) = 10."""
     from drumscribble.data.webdataset_loader import create_webdataset_pipeline
 
     pipeline = create_webdataset_pipeline(
@@ -97,13 +104,13 @@ def test_pipeline_iterates_all_samples(shard_root):
         datasets=["egmd_upload"],
         split="train",
         shuffle=False,
-        epoch_size=5,
     )
     samples = list(pipeline)
-    assert len(samples) == 5
+    assert len(samples) == 10
 
 
 def test_pipeline_validation_split(shard_root):
+    """3 validation samples of 1500 frames -> 2 chunks each = 6."""
     from drumscribble.data.webdataset_loader import create_webdataset_pipeline
 
     pipeline = create_webdataset_pipeline(
@@ -111,10 +118,9 @@ def test_pipeline_validation_split(shard_root):
         datasets=["egmd_upload"],
         split="validation",
         shuffle=False,
-        epoch_size=3,
     )
     samples = list(pipeline)
-    assert len(samples) == 3
+    assert len(samples) == 6
 
 
 def test_dataloader_batching(shard_root):
@@ -157,7 +163,7 @@ def test_training_loop(shard_root):
         datasets=["egmd_upload"],
         split="train",
         shuffle=False,
-        epoch_size=4,
+        epoch_size=4,  # 10 chunks available, use 4 for speed
     )
     loader = torch.utils.data.DataLoader(
         pipeline, batch_size=2, num_workers=0, collate_fn=collate_fn,
@@ -178,16 +184,18 @@ def test_training_loop(shard_root):
 
 @pytest.fixture
 def multi_shard_root(tmp_path):
-    """Create a shard_root with two datasets."""
+    """Create a shard_root with two datasets (variable length)."""
     for ds_name, prefix in [("egmd_upload", "egmd"), ("star-drums", "star")]:
         train_dir = tmp_path / ds_name / "data" / "features" / "train"
         train_dir.mkdir(parents=True)
         _make_shard(train_dir / "feature-shard-00000.tar",
-                    keys=[f"{prefix}_{i}" for i in range(4)])
+                    keys=[f"{prefix}_{i}" for i in range(4)],
+                    n_frames=1250)  # 2 chunks each
     return tmp_path
 
 
 def test_multi_dataset_pipeline(multi_shard_root):
+    """4 samples * 2 chunks * 2 datasets = 16 total chunks."""
     from drumscribble.data.webdataset_loader import create_webdataset_pipeline
 
     pipeline = create_webdataset_pipeline(
@@ -195,9 +203,9 @@ def test_multi_dataset_pipeline(multi_shard_root):
         datasets=["egmd_upload", "star-drums"],
         split="train",
         shuffle=False,
-        epoch_size=8,
+        epoch_size=16,
     )
     samples = list(pipeline)
-    assert len(samples) == 8
+    assert len(samples) == 16
     mel, onset, vel = samples[0]
     assert mel.shape == (N_MELS, 625)
