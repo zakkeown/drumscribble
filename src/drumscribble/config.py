@@ -39,6 +39,12 @@ STAR_ABBREV_TO_GM = {
     "CLP": 39, "SS": 37, "TB": 54,
 }
 
+# STAR 18-class ordering (matches annotation_to_targets index convention)
+STAR_CLASSES = [
+    "BD", "SD", "CHH", "OHH", "PHH", "HT", "MT", "LT",
+    "CRC", "SPC", "CHC", "RD", "RB", "CB", "CL", "CLP", "SS", "TB",
+]
+
 
 # Evaluation class reduction mappings (26-class index -> reduced index)
 def _build_eval_mapping(groups: dict[str, list[int]]) -> dict[int, int]:
