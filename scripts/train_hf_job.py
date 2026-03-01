@@ -4,39 +4,24 @@
 #     "drumscribble @ git+https://github.com/zakkeown/drumscribble.git",
 #     "huggingface_hub[hf_xet]",
 #     "pyyaml",
-#     "datasets>=3.0",
+#     "webdataset",
 # ]
 # ///
 """HF Jobs training script for DrumscribbleCNN.
 
-Supports E-GMD, STAR, or multi-dataset (both) training.
-Downloads datasets from HF Hub, trains DrumscribbleCNN, and uploads
-checkpoints back to HF Hub.
+Downloads WebDataset feature shards from HF Hub, trains DrumscribbleCNN,
+and uploads checkpoints back to HF Hub.
 
 Usage (via hf jobs):
-    # E-GMD only
     hf jobs uv run scripts/train_hf_job.py \
         --flavor a10g-large --timeout 24h \
         --secret HF_TOKEN=$HF_TOKEN \
-        -- --dataset egmd --epochs 100
-
-    # STAR only
-    hf jobs uv run scripts/train_hf_job.py \
-        --flavor a10g-large --timeout 24h \
-        --secret HF_TOKEN=$HF_TOKEN \
-        -- --dataset star --epochs 100
-
-    # Multi-dataset (E-GMD + STAR)
-    hf jobs uv run scripts/train_hf_job.py \
-        --flavor a10g-large --timeout 48h \
-        --secret HF_TOKEN=$HF_TOKEN \
-        -- --dataset multi --epochs 100
+        -- --shard-repo schismaudio/egmd-features \
+           --datasets egmd_upload --epochs 100
 """
 import argparse
-import glob
 import os
 import sys
-import tarfile
 from pathlib import Path
 
 import torch
@@ -44,8 +29,8 @@ import yaml
 from huggingface_hub import HfApi, snapshot_download
 
 
-def download_dataset(repo_id: str, local_dir: str, token: str) -> str:
-    """Download a dataset from HF Hub, return local path."""
+def download_shards(repo_id: str, local_dir: str, token: str) -> str:
+    """Download feature shards from HF Hub, return local path."""
     print(f"Downloading {repo_id}...")
     path = snapshot_download(
         repo_id=repo_id,
@@ -57,42 +42,18 @@ def download_dataset(repo_id: str, local_dir: str, token: str) -> str:
     return path
 
 
-def extract_tars(data_dir: str) -> None:
-    """Extract any .tar archives in the dataset directory."""
-    tar_files = sorted(glob.glob(os.path.join(data_dir, "*.tar")))
-    if not tar_files:
-        return
-    print(f"Extracting {len(tar_files)} tar archives...")
-    for tar_path in tar_files:
-        name = os.path.basename(tar_path)
-        print(f"  Extracting {name}...")
-        with tarfile.open(tar_path) as tf:
-            tf.extractall(data_dir)
-        os.remove(tar_path)
-    print("  Extraction complete.")
-
-
 def main():
     parser = argparse.ArgumentParser(description="Train DrumscribbleCNN on HF Jobs")
-    parser.add_argument("--dataset", type=str, default="parquet",
-                        choices=["egmd", "star", "multi", "parquet"],
-                        help="Dataset to train on")
+    parser.add_argument("--shard-repo", type=str, required=True,
+                        help="HF Hub dataset repo containing feature shards")
+    parser.add_argument("--datasets", type=str, nargs="+", required=True,
+                        help="Dataset names within shard repo (e.g. egmd_upload)")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--chunk-seconds", type=float, default=10.0)
     parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--egmd-repo", type=str, default="zkeown/e-gmd-v1")
-    parser.add_argument("--star-repo", type=str, default="zkeown/star-drums-v1")
+    parser.add_argument("--shuffle-buffer", type=int, default=5000)
     parser.add_argument("--output-repo", type=str, default="zkeown/drumscribble-checkpoints")
-    parser.add_argument("--dataset-weights", type=float, nargs=2, default=[0.5, 0.5],
-                        help="Weights for multi-dataset mode [egmd, star]")
-    parser.add_argument("--hf-dataset", type=str,
-                        default="schismaudio/e-gmd-aug,schismaudio/star-drums-aug",
-                        help="Comma-separated HF Hub dataset repos for parquet mode")
-    parser.add_argument("--parquet-source", type=str, default=None,
-                        choices=["egmd", "star"],
-                        help="Filter parquet dataset by source")
     parser.add_argument("--resume-from", type=str, default=None,
                         help="Checkpoint filename in output repo (e.g. checkpoint_epoch10.pt)")
     args = parser.parse_args()
@@ -114,17 +75,8 @@ def main():
         print("WARNING: No GPU detected, training on CPU")
     print(f"Device: {device}")
 
-    # --- Download dataset(s) ---
-    egmd_dir = None
-    star_dir = None
-
-    if args.dataset in ("egmd", "multi"):
-        egmd_dir = download_dataset(args.egmd_repo, "/tmp/e-gmd", token)
-        extract_tars(egmd_dir)
-
-    if args.dataset in ("star", "multi"):
-        star_dir = download_dataset(args.star_repo, "/tmp/star-drums", token)
-        extract_tars(star_dir)
+    # --- Download feature shards ---
+    shard_root = download_shards(args.shard_repo, "/tmp/shards", token)
 
     # --- Create output repo if needed ---
     try:
@@ -137,9 +89,7 @@ def main():
     from torch.utils.data import DataLoader
 
     from drumscribble.data.augment import SpecAugment
-    from drumscribble.data.egmd import EGMDDataset
-    from drumscribble.data.multi import MultiDatasetLoader
-    from drumscribble.data.star import STARDataset
+    from drumscribble.data.webdataset_loader import create_webdataset_pipeline
     from drumscribble.loss import DrumscribbleLoss
     from drumscribble.model.drumscribble import DrumscribbleCNN
     from drumscribble.train import (
@@ -174,74 +124,35 @@ def main():
     print(f"Parameters: {params:,}")
 
     # --- Dataset & DataLoader ---
-    chunk_seconds = args.chunk_seconds
+    pipeline = create_webdataset_pipeline(
+        shard_root=shard_root,
+        datasets=args.datasets,
+        split="train",
+        shuffle=True,
+        shuffle_buffer=args.shuffle_buffer,
+    )
+    print(f"Training from shards: {', '.join(args.datasets)}")
+    print(f"Shard root: {shard_root}")
+
     augment = SpecAugment()
     collate_fn = AugmentCollate(augment)
 
-    if args.dataset == "egmd":
-        dataset = EGMDDataset(root=Path(egmd_dir), split="train", chunk_seconds=chunk_seconds)
-        print(f"E-GMD training samples: {len(dataset):,}")
-        loader = DataLoader(
-            dataset, batch_size=args.batch_size, shuffle=True,
-            num_workers=args.num_workers, drop_last=True, collate_fn=collate_fn,
-        )
-    elif args.dataset == "star":
-        dataset = STARDataset(root=Path(star_dir), split="training", chunk_seconds=chunk_seconds)
-        print(f"STAR training samples: {len(dataset):,}")
-        loader = DataLoader(
-            dataset, batch_size=args.batch_size, shuffle=True,
-            num_workers=args.num_workers, drop_last=True, collate_fn=collate_fn,
-        )
-    elif args.dataset == "multi":
-        egmd_ds = EGMDDataset(root=Path(egmd_dir), split="train", chunk_seconds=chunk_seconds)
-        star_ds = STARDataset(root=Path(star_dir), split="training", chunk_seconds=chunk_seconds)
-        print(f"E-GMD samples: {len(egmd_ds):,}, STAR samples: {len(star_ds):,}")
-        print(f"Weights: E-GMD={args.dataset_weights[0]}, STAR={args.dataset_weights[1]}")
-
-        multi_loader = MultiDatasetLoader(
-            datasets=[egmd_ds, star_ds],
-            batch_size=args.batch_size,
-            weights=args.dataset_weights,
-            num_workers=args.num_workers,
-        )
-        # Rebuild with collate_fn
-        loader = DataLoader(
-            multi_loader.concat,
-            batch_size=args.batch_size,
-            sampler=multi_loader.loader.sampler,
-            num_workers=args.num_workers,
-            drop_last=True,
-            collate_fn=collate_fn,
-        )
-        total = len(egmd_ds) + len(star_ds)
-        print(f"Multi-dataset total: {total:,} samples")
-
-    elif args.dataset == "parquet":
-        from datasets import concatenate_datasets as hf_concat
-        from datasets import load_dataset as hf_load_dataset
-
-        from drumscribble.data.parquet import ParquetDataset
-
-        repos = [r.strip() for r in args.hf_dataset.split(",")]
-        print(f"Loading parquet datasets: {repos}")
-        parts = [hf_load_dataset(repo, split="train") for repo in repos]
-        hf_ds = hf_concat(parts) if len(parts) > 1 else parts[0]
-        dataset = ParquetDataset(hf_ds, source=args.parquet_source,
-                                 split="train", chunk_seconds=chunk_seconds)
-        src_label = f" (source={args.parquet_source})" if args.parquet_source else ""
-        print(f"Parquet training samples{src_label}: {len(dataset):,}")
-        loader = DataLoader(
-            dataset, batch_size=args.batch_size, shuffle=True,
-            num_workers=args.num_workers, drop_last=True, collate_fn=collate_fn,
-        )
+    loader = DataLoader(
+        pipeline,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        collate_fn=collate_fn,
+    )
 
     # --- Optimizer ---
     optimizer = create_optimizer(model, lr=args.lr, weight_decay=0.05)
     loss_fn = DrumscribbleLoss()
 
+    # WebDataset IterableDataset doesn't have len(); estimate from config
+    estimated_batches = 35000 // args.batch_size
     warmup_epochs = 5
-    warmup_steps = warmup_epochs * len(loader)
-    total_steps = args.epochs * len(loader)
+    warmup_steps = warmup_epochs * estimated_batches
+    total_steps = args.epochs * estimated_batches
     scheduler = create_scheduler(optimizer, warmup_steps, total_steps)
 
     ema = EMAModel(model, decay=0.999)
@@ -275,9 +186,9 @@ def main():
     output_dir = Path("/tmp/outputs")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"\nStarting training: {args.dataset} | epochs {start_epoch+1}-{args.epochs} | "
+    print(f"\nStarting training: {args.datasets} | epochs {start_epoch+1}-{args.epochs} | "
           f"batch_size={args.batch_size} | lr={args.lr}")
-    print(f"Steps/epoch: {len(loader):,} | total steps: {total_steps:,}")
+    print(f"Estimated steps/epoch: {estimated_batches:,} | total steps: {total_steps:,}")
     print("=" * 60)
 
     for epoch in range(start_epoch, args.epochs):
