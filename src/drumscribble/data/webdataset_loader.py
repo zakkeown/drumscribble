@@ -7,6 +7,40 @@ import webdataset as wds
 
 from drumscribble.config import FPS
 
+# Known file suffixes in feature shards (with leading dot).
+_KNOWN_SUFFIXES = (
+    ".mel_spectrogram.npy",
+    ".onset_targets.npy",
+    ".velocity_targets.npy",
+    ".params.json",
+)
+
+
+def _fix_sample_keys(sample: dict) -> dict:
+    """Normalize sample dict keys broken by dots in sample names.
+
+    WebDataset's base_plus_ext splits tar member names on the first dot
+    to separate the sample key from the file extension.  Sample keys
+    containing dots (e.g. "M.E.R.C._Music__...") break this splitting,
+    leaving the full filename as the dict key instead of just the
+    extension.  This function detects and fixes such samples by
+    extracting the correct extension suffix.
+    """
+    if "mel_spectrogram.npy" in sample:
+        return sample  # already correct
+    fixed = {}
+    for k, v in sample.items():
+        matched = False
+        for sfx in _KNOWN_SUFFIXES:
+            if k.endswith(sfx):
+                ext = sfx[1:]  # strip leading dot
+                fixed[ext] = v
+                matched = True
+                break
+        if not matched:
+            fixed[k] = v
+    return fixed
+
 
 def discover_shards(
     shard_root: str | Path,
@@ -131,6 +165,7 @@ def create_webdataset_pipeline(
 
     pipeline = (
         pipeline
+        .map(_fix_sample_keys)
         .decode()
         .to_tuple(
             "mel_spectrogram.npy",
