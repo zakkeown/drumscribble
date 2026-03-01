@@ -51,7 +51,8 @@ def _chunk_sample(sample, chunk_frames: int):
     dropped if shorter than chunk_frames.
     """
     mel, onset, vel = sample
-    n_frames = mel.shape[-1]
+    # Use minimum length across arrays (mel/onset/vel may differ by 1 frame)
+    n_frames = min(mel.shape[-1], onset.shape[-1], vel.shape[-1])
 
     if n_frames <= chunk_frames:
         # Pad short samples
