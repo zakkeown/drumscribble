@@ -174,3 +174,30 @@ def test_training_loop(shard_root):
     avg_loss = train_one_epoch(model, loader, optimizer, loss_fn, device="cpu")
     assert avg_loss > 0
     assert not torch.isnan(torch.tensor(avg_loss))
+
+
+@pytest.fixture
+def multi_shard_root(tmp_path):
+    """Create a shard_root with two datasets."""
+    for ds_name, prefix in [("egmd_upload", "egmd"), ("star-drums", "star")]:
+        train_dir = tmp_path / ds_name / "data" / "features" / "train"
+        train_dir.mkdir(parents=True)
+        _make_shard(train_dir / "feature-shard-00000.tar",
+                    keys=[f"{prefix}_{i}" for i in range(4)])
+    return tmp_path
+
+
+def test_multi_dataset_pipeline(multi_shard_root):
+    from drumscribble.data.webdataset_loader import create_webdataset_pipeline
+
+    pipeline = create_webdataset_pipeline(
+        shard_root=multi_shard_root,
+        datasets=["egmd_upload", "star-drums"],
+        split="train",
+        shuffle=False,
+        epoch_size=8,
+    )
+    samples = list(pipeline)
+    assert len(samples) == 8
+    mel, onset, vel = samples[0]
+    assert mel.shape == (N_MELS, 625)
