@@ -12,14 +12,12 @@ training:
   weight_decay: 0.05
   epochs: 100
   grad_clip: 1.0
-  chunk_seconds: 10.0
   num_workers: 4
   warmup_epochs: 5
   ema_decay: 0.999
-  dataset: egmd  # egmd, star, or multi
-  dataset_weights: [0.5, 0.5]  # weights for multi-dataset mode
 
 data:
-  egmd_root: ~/Documents/Datasets/e-gmd
-  star_root: ~/Documents/Datasets/star-drums
-  hf_dataset_repo: schismaudio/e-gmd-aug,schismaudio/star-drums-aug
+  shard_root: ~/Documents/Datasets/build
+  datasets:
+    - egmd_upload
+  shuffle_buffer: 5000

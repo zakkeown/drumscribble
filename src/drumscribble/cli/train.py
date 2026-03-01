@@ -7,10 +7,7 @@ import yaml
 from torch.utils.data import DataLoader
 
 from drumscribble.data.augment import SpecAugment
-from drumscribble.data.egmd import EGMDDataset
-from drumscribble.data.multi import MultiDatasetLoader
-from drumscribble.data.parquet import ParquetDataset
-from drumscribble.data.star import STARDataset
+from drumscribble.data.webdataset_loader import create_webdataset_pipeline
 from drumscribble.loss import DrumscribbleLoss
 from drumscribble.model.drumscribble import DrumscribbleCNN
 from drumscribble.train import (
@@ -36,59 +33,6 @@ class AugmentCollate:
         return mel_batch, onset_batch, vel_batch
 
 
-def build_dataset(dataset_name: str, data_cfg: dict, train_cfg: dict,
-                  hf_dataset: str | None = None, parquet_source: str | None = None):
-    """Build dataset(s) based on config.
-
-    Args:
-        dataset_name: One of "egmd", "star", "multi", or "parquet".
-        data_cfg: Data configuration dict with root paths.
-        train_cfg: Training configuration dict.
-        hf_dataset: HF Hub dataset repo for parquet mode (overrides config).
-        parquet_source: Filter parquet dataset by source.
-
-    Returns:
-        Dataset or list of datasets for multi mode.
-    """
-    chunk_seconds = train_cfg["chunk_seconds"]
-
-    if dataset_name == "egmd":
-        return EGMDDataset(
-            root=Path(data_cfg["egmd_root"]).expanduser(),
-            split="train",
-            chunk_seconds=chunk_seconds,
-        )
-    elif dataset_name == "star":
-        return STARDataset(
-            root=Path(data_cfg["star_root"]).expanduser(),
-            split="training",
-            chunk_seconds=chunk_seconds,
-        )
-    elif dataset_name == "multi":
-        egmd = EGMDDataset(
-            root=Path(data_cfg["egmd_root"]).expanduser(),
-            split="train",
-            chunk_seconds=chunk_seconds,
-        )
-        star = STARDataset(
-            root=Path(data_cfg["star_root"]).expanduser(),
-            split="training",
-            chunk_seconds=chunk_seconds,
-        )
-        return [egmd, star]
-    elif dataset_name == "parquet":
-        from datasets import load_dataset, concatenate_datasets
-        repos = hf_dataset or data_cfg.get("hf_dataset_repo", "schismaudio/e-gmd-aug,schismaudio/star-drums-aug")
-        parts = []
-        for repo in repos.split(","):
-            repo = repo.strip()
-            parts.append(load_dataset(repo, split="train"))
-        hf_ds = concatenate_datasets(parts) if len(parts) > 1 else parts[0]
-        return ParquetDataset(hf_ds, source=parquet_source, split="train", chunk_seconds=chunk_seconds)
-    else:
-        raise ValueError(f"Unknown dataset: {dataset_name}")
-
-
 def main():
     parser = argparse.ArgumentParser(description="Train DrumscribbleCNN")
     parser.add_argument("--config", type=str, default="configs/train/default.yaml")
@@ -96,30 +40,23 @@ def main():
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--output-dir", type=str, default="outputs")
     parser.add_argument(
-        "--dataset",
+        "--shard-root",
         type=str,
         default=None,
-        choices=["egmd", "star", "multi", "parquet"],
-        help="Dataset to use (overrides config)",
+        help="Root directory for feature shards (overrides config)",
+    )
+    parser.add_argument(
+        "--datasets",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Dataset names to train on (overrides config)",
     )
     parser.add_argument(
         "--resume",
         type=str,
         default=None,
         help="Path to checkpoint to resume training from",
-    )
-    parser.add_argument(
-        "--hf-dataset",
-        type=str,
-        default=None,
-        help="HF Hub dataset repo for parquet mode (overrides config)",
-    )
-    parser.add_argument(
-        "--parquet-source",
-        type=str,
-        default=None,
-        choices=["egmd", "star"],
-        help="Filter parquet dataset by source",
     )
     args = parser.parse_args()
 
@@ -154,48 +91,31 @@ def main():
         model.freeze_bn()
         print("Frozen BatchNorm for MPS training")
 
-    # --- Dataset & DataLoader ---
-    dataset_name = args.dataset or train_cfg.get("dataset", "egmd")
+    # --- Dataset ---
+    shard_root = args.shard_root or data_cfg["shard_root"]
+    datasets = args.datasets or data_cfg["datasets"]
+    shuffle_buffer = data_cfg.get("shuffle_buffer", 5000)
+
+    pipeline = create_webdataset_pipeline(
+        shard_root=shard_root,
+        datasets=datasets,
+        split="train",
+        shuffle=True,
+        shuffle_buffer=shuffle_buffer,
+    )
+    print(f"Training from shards: {', '.join(datasets)}")
+    print(f"Shard root: {shard_root}")
+
     augment = SpecAugment()
     collate_fn = AugmentCollate(augment)
     num_workers = 0 if device == "mps" else train_cfg["num_workers"]
 
-    if dataset_name == "multi":
-        datasets = build_dataset("multi", data_cfg, train_cfg,
-                                 hf_dataset=args.hf_dataset, parquet_source=args.parquet_source)
-        weights = train_cfg.get("dataset_weights", [0.5, 0.5])
-        multi_loader = MultiDatasetLoader(
-            datasets=datasets,
-            batch_size=train_cfg["batch_size"],
-            weights=weights,
-            num_workers=num_workers,
-        )
-        loader = multi_loader.loader
-        # Patch collate into the existing loader by rebuilding
-        loader = DataLoader(
-            multi_loader.concat,
-            batch_size=train_cfg["batch_size"],
-            sampler=loader.sampler,
-            num_workers=num_workers,
-            drop_last=True,
-            collate_fn=collate_fn,
-        )
-        total_samples = sum(len(d) for d in datasets)
-        print(f"Multi-dataset training: {total_samples:,} total samples")
-        for i, ds in enumerate(datasets):
-            print(f"  Dataset {i}: {len(ds):,} samples, weight={weights[i]}")
-    else:
-        dataset = build_dataset(dataset_name, data_cfg, train_cfg,
-                                hf_dataset=args.hf_dataset, parquet_source=args.parquet_source)
-        print(f"Training samples ({dataset_name}): {len(dataset):,}")
-        loader = DataLoader(
-            dataset,
-            batch_size=train_cfg["batch_size"],
-            shuffle=True,
-            num_workers=num_workers,
-            drop_last=True,
-            collate_fn=collate_fn,
-        )
+    loader = DataLoader(
+        pipeline,
+        batch_size=train_cfg["batch_size"],
+        num_workers=num_workers,
+        collate_fn=collate_fn,
+    )
 
     # --- Optimizer ---
     optimizer = create_optimizer(
@@ -206,9 +126,12 @@ def main():
     epochs = args.epochs if args.epochs is not None else train_cfg["epochs"]
 
     # --- Scheduler ---
+    # WebDataset IterableDataset doesn't have len(); estimate from config
+    # E-GMD has ~35k training samples; adjust if using more datasets
+    estimated_batches = 35000 // train_cfg["batch_size"]
     warmup_epochs = train_cfg.get("warmup_epochs", 5)
-    warmup_steps = warmup_epochs * len(loader)
-    total_steps = epochs * len(loader)
+    warmup_steps = warmup_epochs * estimated_batches
+    total_steps = epochs * estimated_batches
     scheduler = create_scheduler(optimizer, warmup_steps, total_steps)
 
     # --- EMA ---
