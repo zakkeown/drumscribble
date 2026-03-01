@@ -31,16 +31,23 @@ def remap_shard(src_path: Path, dst_path: Path) -> int:
     with tarfile.open(src_path, "r") as src, tarfile.open(dst_path, "w") as dst:
         members = src.getmembers()
 
-        # Group members by sample key
+        # Group members by sample key (keys may contain dots, e.g. "M.E.R.C.")
+        _SUFFIXES = [
+            ".mel_spectrogram.npy",
+            ".onset_targets.npy",
+            ".velocity_targets.npy",
+            ".params.json",
+        ]
         samples: dict[str, dict[str, tarfile.TarInfo]] = {}
         for m in members:
-            # Split on first dot to get sample key
-            dot_idx = m.name.index(".")
-            key = m.name[:dot_idx]
-            suffix = m.name[dot_idx + 1:]
-            if key not in samples:
-                samples[key] = {}
-            samples[key][suffix] = m
+            for sfx in _SUFFIXES:
+                if m.name.endswith(sfx):
+                    key = m.name[: -len(sfx)]
+                    suffix = sfx[1:]  # strip leading dot
+                    if key not in samples:
+                        samples[key] = {}
+                    samples[key][suffix] = m
+                    break
 
         for key, parts in samples.items():
             # Read existing arrays
