@@ -51,18 +51,19 @@ def _chunk_sample(sample, chunk_frames: int):
     dropped if shorter than chunk_frames.
     """
     mel, onset, vel = sample
-    # Use minimum length across arrays (mel/onset/vel may differ by 1 frame)
+    # Trim to shortest array (mel/onset/vel may differ by 1 frame)
     n_frames = min(mel.shape[-1], onset.shape[-1], vel.shape[-1])
+    mel = mel[:, :n_frames]
+    onset = onset[:, :n_frames]
+    vel = vel[:, :n_frames]
 
     if n_frames <= chunk_frames:
-        # Pad short samples
         pad_width = chunk_frames - n_frames
         mel = np.pad(mel, ((0, 0), (0, pad_width)))
         onset = np.pad(onset, ((0, 0), (0, pad_width)))
         vel = np.pad(vel, ((0, 0), (0, pad_width)))
         yield (mel, onset, vel)
     else:
-        # Split into non-overlapping chunks, drop remainder
         for start in range(0, n_frames - chunk_frames + 1, chunk_frames):
             end = start + chunk_frames
             yield (mel[:, start:end], onset[:, start:end], vel[:, start:end])
