@@ -19,7 +19,7 @@ training:
 data:
   backend: parquet  # "parquet" or "webdataset"
   # Parquet backend (default)
-  parquet_root: ~/Documents/Datasets/hf_cache
+  parquet_root: ~/Documents/Datasets/parquet
   parquet_datasets:
     - e-gmd-aug
     - star-drums-aug
