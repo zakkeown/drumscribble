@@ -17,9 +17,16 @@ training:
   ema_decay: 0.999
 
 data:
+  backend: parquet  # "parquet" or "webdataset"
+  # Parquet backend (default)
+  parquet_root: ~/Documents/Datasets/hf_cache
+  parquet_datasets:
+    - e-gmd-aug
+    - star-drums-aug
+  # WebDataset backend (fallback)
   shard_root: ~/Documents/Datasets/build
   datasets:
     - egmd_upload
     - star-drums
   shuffle_buffer: 5000
-  estimated_samples: 41000  # ~35k E-GMD + ~6k STAR; used for scheduler step count
+  estimated_samples: 164000  # ~140k E-GMD-Aug + ~24k STAR-Aug; used for scheduler step count

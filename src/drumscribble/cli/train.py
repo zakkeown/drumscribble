@@ -7,6 +7,7 @@ import yaml
 from torch.utils.data import DataLoader
 
 from drumscribble.data.augment import SpecAugment
+from drumscribble.data.parquet_loader import create_parquet_pipeline
 from drumscribble.data.webdataset_loader import create_webdataset_pipeline
 from drumscribble.loss import DrumscribbleLoss
 from drumscribble.model.drumscribble import DrumscribbleCNN
@@ -39,6 +40,19 @@ def main():
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--output-dir", type=str, default="outputs")
+    parser.add_argument(
+        "--backend",
+        type=str,
+        choices=["parquet", "webdataset"],
+        default=None,
+        help="Data backend (overrides config, default: parquet)",
+    )
+    parser.add_argument(
+        "--parquet-root",
+        type=str,
+        default=None,
+        help="Root directory for parquet datasets (overrides config)",
+    )
     parser.add_argument(
         "--shard-root",
         type=str,
@@ -92,19 +106,34 @@ def main():
         print("Frozen BatchNorm for MPS training")
 
     # --- Dataset ---
-    shard_root = args.shard_root or data_cfg["shard_root"]
-    datasets = args.datasets or data_cfg["datasets"]
+    backend = args.backend or data_cfg.get("backend", "parquet")
     shuffle_buffer = data_cfg.get("shuffle_buffer", 5000)
 
-    pipeline = create_webdataset_pipeline(
-        shard_root=shard_root,
-        datasets=datasets,
-        split="train",
-        shuffle=True,
-        shuffle_buffer=shuffle_buffer,
-    )
-    print(f"Training from shards: {', '.join(datasets)}")
-    print(f"Shard root: {shard_root}")
+    if backend == "parquet":
+        parquet_root = args.parquet_root or data_cfg.get("parquet_root", "~/Documents/Datasets/hf_cache")
+        datasets = args.datasets or data_cfg.get("parquet_datasets", data_cfg["datasets"])
+        pipeline = create_parquet_pipeline(
+            data_root=parquet_root,
+            datasets=datasets,
+            split="train",
+            shuffle=True,
+            shuffle_buffer=shuffle_buffer,
+        )
+        print(f"Backend: parquet")
+        print(f"Data root: {parquet_root}")
+    else:
+        shard_root = args.shard_root or data_cfg["shard_root"]
+        datasets = args.datasets or data_cfg["datasets"]
+        pipeline = create_webdataset_pipeline(
+            shard_root=shard_root,
+            datasets=datasets,
+            split="train",
+            shuffle=True,
+            shuffle_buffer=shuffle_buffer,
+        )
+        print(f"Backend: webdataset")
+        print(f"Shard root: {shard_root}")
+    print(f"Training datasets: {', '.join(datasets)}")
 
     augment = SpecAugment()
     collate_fn = AugmentCollate(augment)

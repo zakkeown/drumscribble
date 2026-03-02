@@ -3,21 +3,21 @@
 # dependencies = [
 #     "drumscribble @ git+https://github.com/zakkeown/drumscribble.git",
 #     "huggingface_hub[hf_xet]",
+#     "pyarrow>=14.0",
 #     "pyyaml",
-#     "webdataset",
 # ]
 # ///
 """HF Jobs training script for DrumscribbleCNN.
 
-Downloads WebDataset feature shards from HF Hub, trains DrumscribbleCNN,
+Downloads augmented parquet datasets from HF Hub, trains DrumscribbleCNN,
 and uploads checkpoints back to HF Hub.
 
 Usage (via hf jobs):
     hf jobs uv run scripts/train_hf_job.py \
         --flavor a10g-large --timeout 24h \
         --secret HF_TOKEN=$HF_TOKEN \
-        -- --shard-repo schismaudio/egmd-features \
-           --datasets egmd_upload --epochs 100
+        -- --dataset-repos schismaudio/e-gmd-aug schismaudio/star-drums-aug \
+           --epochs 100
 """
 import argparse
 import os
@@ -25,12 +25,13 @@ import sys
 from pathlib import Path
 
 import torch
-import yaml
 from huggingface_hub import HfApi, snapshot_download
 
 
-def download_shards(repo_id: str, local_dir: str, token: str) -> str:
-    """Download feature shards from HF Hub, return local path."""
+def download_dataset(repo_id: str, data_root: str, token: str) -> str:
+    """Download a parquet dataset from HF Hub, return local path."""
+    # Use repo name as local directory name
+    local_dir = str(Path(data_root) / repo_id.split("/")[-1])
     print(f"Downloading {repo_id}...")
     path = snapshot_download(
         repo_id=repo_id,
@@ -44,10 +45,8 @@ def download_shards(repo_id: str, local_dir: str, token: str) -> str:
 
 def main():
     parser = argparse.ArgumentParser(description="Train DrumscribbleCNN on HF Jobs")
-    parser.add_argument("--shard-repo", type=str, required=True,
-                        help="HF Hub dataset repo containing feature shards")
-    parser.add_argument("--datasets", type=str, nargs="+", required=True,
-                        help="Dataset names within shard repo (e.g. egmd_upload)")
+    parser.add_argument("--dataset-repos", type=str, nargs="+", required=True,
+                        help="HF Hub dataset repo IDs (e.g. schismaudio/e-gmd-aug)")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -75,8 +74,12 @@ def main():
         print("WARNING: No GPU detected, training on CPU")
     print(f"Device: {device}")
 
-    # --- Download feature shards ---
-    shard_root = download_shards(args.shard_repo, "/tmp/shards", token)
+    # --- Download parquet datasets ---
+    data_root = "/tmp/datasets"
+    dataset_names = []
+    for repo_id in args.dataset_repos:
+        download_dataset(repo_id, data_root, token)
+        dataset_names.append(repo_id.split("/")[-1])
 
     # --- Create output repo if needed ---
     try:
@@ -89,7 +92,7 @@ def main():
     from torch.utils.data import DataLoader
 
     from drumscribble.data.augment import SpecAugment
-    from drumscribble.data.webdataset_loader import create_webdataset_pipeline
+    from drumscribble.data.parquet_loader import create_parquet_pipeline
     from drumscribble.loss import DrumscribbleLoss
     from drumscribble.model.drumscribble import DrumscribbleCNN
     from drumscribble.train import (
@@ -124,15 +127,15 @@ def main():
     print(f"Parameters: {params:,}")
 
     # --- Dataset & DataLoader ---
-    pipeline = create_webdataset_pipeline(
-        shard_root=shard_root,
-        datasets=args.datasets,
+    pipeline = create_parquet_pipeline(
+        data_root=data_root,
+        datasets=dataset_names,
         split="train",
         shuffle=True,
         shuffle_buffer=args.shuffle_buffer,
     )
-    print(f"Training from shards: {', '.join(args.datasets)}")
-    print(f"Shard root: {shard_root}")
+    print(f"Training datasets: {', '.join(dataset_names)}")
+    print(f"Data root: {data_root}")
 
     augment = SpecAugment()
     collate_fn = AugmentCollate(augment)
@@ -148,8 +151,8 @@ def main():
     optimizer = create_optimizer(model, lr=args.lr, weight_decay=0.05)
     loss_fn = DrumscribbleLoss()
 
-    # WebDataset IterableDataset doesn't have len(); estimate from config
-    estimated_batches = 35000 // args.batch_size
+    # IterableDataset doesn't have len(); estimate from augmented dataset sizes
+    estimated_batches = 164000 // args.batch_size
     warmup_epochs = 5
     warmup_steps = warmup_epochs * estimated_batches
     total_steps = args.epochs * estimated_batches
@@ -186,7 +189,7 @@ def main():
     output_dir = Path("/tmp/outputs")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"\nStarting training: {args.datasets} | epochs {start_epoch+1}-{args.epochs} | "
+    print(f"\nStarting training: {dataset_names} | epochs {start_epoch+1}-{args.epochs} | "
           f"batch_size={args.batch_size} | lr={args.lr}")
     print(f"Estimated steps/epoch: {estimated_batches:,} | total steps: {total_steps:,}")
     print("=" * 60)
